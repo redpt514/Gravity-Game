@@ -32,10 +32,17 @@ export interface World {
   meanDensity: number;
 }
 
+const WORLDS = new WeakMap<GameState, World>();
+
+/** The simulation World behind a GameState made by createGame (undefined for foreign states, e.g. UI mocks). */
+export function worldOf(s: GameState): World | undefined {
+  return WORLDS.get(s);
+}
+
 export function makeWorld(s: GameState, rng: Rng): World {
   const n = s.gridW * s.gridH;
   const f = () => new Float32Array(n);
-  return {
+  const w: World = {
     s, rng, nextBodyId: 1, nextNodeId: 1,
     cell: s.width / s.gridW,
     ambientBase: f(), rippleSin: f(), rippleCos: f(), rho: f(), rhoS: f(), rhoF: f(), lensPot: f(), src: f(), grav: f(), pot: f(),
@@ -48,4 +55,6 @@ export function makeWorld(s: GameState, rng: Rng): World {
     maxDensity: 0,
     meanDensity: s.level.particleCount / n,
   };
+  WORLDS.set(s, w);
+  return w;
 }

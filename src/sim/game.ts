@@ -1,5 +1,6 @@
-import type { Action, ActionResult, Body, BodyKind, Element, Game, GameFactory, GameState, Node, Scoreboard, ToolId } from './types.ts';
-import { ELEMENTS, GRID_H, GRID_W, WORLD_H, WORLD_W } from './types.ts';
+import type { Action, ActionResult, Body, BodyKind, Element, Game, GameFactory, GameOptions, GameState, Node, Scoreboard, ToolId } from './types.ts';
+import { ELEMENTS } from './types.ts';
+import { DEFAULT_WORLD } from './worldSize.ts';
 import { mulberry32 } from './rng.ts';
 import { P } from './params.ts';
 import { TOOL_DEFS, WALL_MAX_LEN } from './tools.ts';
@@ -10,10 +11,7 @@ import { accrete, emptyComposition, formClouds, lifecycle, log, mergeBodies, mov
 import { getLevel } from '../levels/levels.ts';
 import { evaluateGoals, judge } from '../levels/goals.ts';
 
-export interface GameOptions {
-  /** reward tools carried over from earlier levels */
-  inventory?: Partial<Record<ToolId, number>>;
-}
+export type { GameOptions } from './types.ts';
 
 function emptyScoreboard(): Scoreboard {
   const kinds: BodyKind[] = ['cloud', 'planet', 'star_ms', 'star_giant', 'white_dwarf', 'neutron', 'black_hole'];
@@ -25,17 +23,19 @@ function emptyScoreboard(): Scoreboard {
 }
 
 function newWorld(levelId: number, seed: number | undefined, opts: GameOptions): World {
-  const level = getLevel(levelId);
+  const level = opts.level ?? getLevel(levelId);
   const sd = (seed ?? level.seed) >>> 0;
   const rng = mulberry32(sd);
+  const ws = opts.world ?? DEFAULT_WORLD;
+  const W = ws.width, H = ws.height, gw = Math.max(4, Math.round(ws.gridW)), gh = Math.max(4, Math.round(ws.gridH));
   const s: GameState = {
     levelId, level, seed: sd, phase: 'intro', round: 1, tick: 0, totalTick: 0,
     energy: level.startingEnergy,
     inventory: { ...(opts.inventory ?? {}) },
-    particles: initParticles(level, rng, WORLD_W, WORLD_H),
+    particles: initParticles(level, rng, W, H),
     bodies: [], nodes: [],
-    field: new Float32Array(GRID_W * GRID_H),
-    gridW: GRID_W, gridH: GRID_H, width: WORLD_W, height: WORLD_H,
+    field: new Float32Array(gw * gh),
+    gridW: gw, gridH: gh, width: W, height: H,
     scoreboard: emptyScoreboard(),
     goals: level.goals.map((goal) => ({ goal, current: 0, met: false })),
     events: [],
@@ -72,7 +72,7 @@ export function tickWorld(w: World): void {
   buildCellLists(w);
   nodeEffects(w);
   accrete(w);
-  if (s.totalTick % P.cloudCheckEvery === 0) formClouds(w);
+  if (s.totalTick % P.cloudCheckEvery === 0 && s.totalTick >= P.cloudSettleTicks) formClouds(w);
   mergeBodies(w);
   lifecycle(w);
   if (w.removedParticles > 0) {
@@ -287,7 +287,7 @@ export function helpText(s: GameState): string {
     const inv = s.inventory[t] ? ` (free x${s.inventory[t]})` : '';
     lines.push(`  ${t}: cost ${d.cost}${inv}, radius ${d.radius}, ${d.durationRounds === null ? 'permanent' : d.durationRounds + ' round'}. ${d.description}`);
   }
-  lines.push(`ACTIONS (JSON): {"type":"place","tool":"repulsor","x":80,"y":45} | wall needs "x2","y2" (length ${P.wallMinLen}-${P.wallMaxLen}) | nodes of one tool must be ${P.nodeMinSpacing}+ apart | {"type":"remove","nodeId":1} | {"type":"move","nodeId":1,"x":90,"y":40} (this round's nodes only; walls keep their shape unless x2,y2 given) | {"type":"endRound"} | {"type":"restart"}`);
+  lines.push(`ACTIONS (JSON): {"type":"place","tool":"repulsor","x":${Math.round(s.width / 2)},"y":${Math.round(s.height / 2)}} | wall needs "x2","y2" (length ${P.wallMinLen}-${P.wallMaxLen}) | nodes of one tool must be ${P.nodeMinSpacing}+ apart | {"type":"remove","nodeId":1} | {"type":"move","nodeId":1,"x":${Math.round(s.width / 2 + 10)},"y":${Math.round(s.height / 2 - 5)}} (this round's nodes only; walls keep their shape unless x2,y2 given) | {"type":"endRound"} | {"type":"restart"}`);
   return lines.join('\n');
 }
 

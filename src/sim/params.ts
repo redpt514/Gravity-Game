@@ -34,6 +34,7 @@ export const P = {
   cloudCaptureR: 4.5,
   cloudMinParticles: 14,
   cloudCheckEvery: 3,
+  cloudSettleTicks: 15,   // no clouds in the first ticks of a level: random spawn clumps must not count
   minBodySpacing: 7,
   maxNewCloudsPerCheck: 3,
   cloudMaxBirthMass: 30,  // a new cloud captures at most this many (nearest) particles; the rest must be accreted

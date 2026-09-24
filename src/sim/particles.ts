@@ -1,5 +1,5 @@
 import { P } from './params.ts';
-import { sampleGrad } from './field.ts';
+import { particleForce, swirlStrength, type ForceParts } from './force.ts';
 import type { Element, LevelDef, Particle } from './types.ts';
 import { ELEMENTS } from './types.ts';
 import type { Rng } from './rng.ts';
@@ -40,42 +40,35 @@ export function currentAt(w: World, x: number, y: number, out: { x: number; y: n
   const a = s.width / 2, b = s.height / 2;
   const dx = x - a, dy = y - b;
   const u = (dx * dx) / (a * a) + (dy * dy) / (b * b);
-  const sw = P.swirl * (s.level.swirl ?? 1);
+  const sw = swirlStrength(s);
   const u0 = P.swirlFadeStart, u1 = P.swirlFadeEnd;
   const su = u <= u0 ? sw : u >= u1 ? 0 : (sw * (u1 - u)) / (u1 - u0);
   out.x = (su * dy) / b;
   out.y = (-su * dx * b) / (a * a);
 }
 
-/** Integrate free particles along -grad(pressure) + grad(field). */
+/** Integrate free particles: forces from particleForce() (shared with forceAt), damping, speed cap. */
 export function stepFreeParticles(w: World): void {
   const s = w.s;
-  const gw = s.gridW, gh = s.gridH, cell = w.cell;
-  const W = s.width, H = s.height, m = P.boundMargin;
-  const damp = P.damping, acc = P.accel, vmax = P.maxSpeed, vmax2 = vmax * vmax;
-  const gr = { x: 0, y: 0 };
-  // divergence-free elliptical current: v ~ s(u) * (dy/b, -dx*b/a^2), u = (dx/a)^2 + (dy/b)^2
-  const a = W / 2, b = H / 2, ia2 = 1 / (a * a), ib2 = 1 / (b * b);
-  const sw = P.swirl * (s.level.swirl ?? 1);
-  const u0 = P.swirlFadeStart, u1 = P.swirlFadeEnd;
+  const cell = w.cell, pot = w.pot;
+  const W = s.width, H = s.height;
+  const damp = P.damping, vmax = P.maxSpeed, vmax2 = vmax * vmax;
+  const f = FP;
   for (const p of s.particles) {
     if (p.bodyId !== 0) continue;
-    sampleGrad(w.pot, gw, gh, cell, p.x, p.y, gr);
-    const dx = p.x - a, dy = p.y - b;
-    const u = dx * dx * ia2 + dy * dy * ib2;
-    const su = u <= u0 ? sw : u >= u1 ? 0 : sw * (u1 - u) / (u1 - u0);
-    let vx = p.vx * damp + acc * gr.x + su * dy / b;
-    let vy = p.vy * damp + acc * gr.y - su * dx * b * ia2;
-    if (p.x < m) vx += P.boundK * (m - p.x); else if (p.x > W - m) vx -= P.boundK * (p.x - (W - m));
-    if (p.y < m) vy += P.boundK * (m - p.y); else if (p.y > H - m) vy -= P.boundK * (p.y - (H - m));
+    particleForce(s, pot, cell, p.x, p.y, f);
+    let vx = p.vx * damp + f.gx + f.cx + f.bx;
+    let vy = p.vy * damp + f.gy + f.cy + f.by;
     const v2 = vx * vx + vy * vy;
-    if (v2 > vmax2) { const f = vmax / Math.sqrt(v2); vx *= f; vy *= f; }
+    if (v2 > vmax2) { const k = vmax / Math.sqrt(v2); vx *= k; vy *= k; }
     let x = p.x + vx, y = p.y + vy;
     if (x < 0.1) { x = 0.1; vx = 0; } else if (x > W - 0.1) { x = W - 0.1; vx = 0; }
     if (y < 0.1) { y = 0.1; vy = 0; } else if (y > H - 0.1) { y = H - 0.1; vy = 0; }
     p.x = x; p.y = y; p.vx = vx; p.vy = vy;
   }
 }
+
+const FP: ForceParts = { gx: 0, gy: 0, cx: 0, cy: 0, bx: 0, by: 0 };
 
 /** Captured particles ride along with their body, kept inside its radius. */
 export function stepCapturedParticles(w: World): void {

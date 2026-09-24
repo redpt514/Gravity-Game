@@ -1,6 +1,7 @@
 import { P } from './params.ts';
 import { sample } from './field.ts';
 import { currentAt, forEachFreeNear } from './particles.ts';
+import { swirlStrength } from './force.ts';
 import { TOOL_DEFS } from './tools.ts';
 import type { Body, BodyKind, Element, GameState, Node } from './types.ts';
 import { ELEMENTS } from './types.ts';
@@ -119,7 +120,7 @@ export function moveBodies(w: World): void {
   const gw = s.gridW, gh = s.gridH, cell = w.cell;
   const cur = { x: 0, y: 0 };
   const a = s.width / 2, bb = s.height / 2;
-  const sw = P.swirl * (s.level.swirl ?? 1);
+  const sw = swirlStrength(s);
   for (const b of s.bodies) {
     const mob = b.kind === 'black_hole' ? P.bodyMobility * 0.3 : P.bodyMobility;
     const drift = b.kind === 'black_hole' ? 0 : P.bodyDrift;
