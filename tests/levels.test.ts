@@ -115,14 +115,14 @@ describe('game rules', () => {
     expect(msg).not.toMatch(/planet/);
   }, 30000);
 
-  it('remove refunds 50% only in the round placed', () => {
+  it('remove refunds in full only in the round placed', () => {
     const g = createGame(1);
     g.apply({ type: 'place', tool: 'repulsor', x: 40, y: 40 });
     g.apply({ type: 'place', tool: 'repulsor', x: 100, y: 40 });
     const [n1, n2] = g.state().nodes;
     expect(n2).toBeDefined();
     expect(g.apply({ type: 'remove', nodeId: n1.id }).ok).toBe(true);
-    expect(g.state().energy).toBe(10 + 15);
+    expect(g.state().energy).toBe(10 + 30);
     applyActions(g, [{ type: 'endRound' }]);
     g.apply({ type: 'start' });
     const e = g.state().energy;
@@ -130,6 +130,36 @@ describe('game rules', () => {
     expect(g.state().energy).toBe(e);
     expect(g.apply({ type: 'remove', nodeId: 999 }).ok).toBe(false);
   });
+
+  it('move repositions this round\'s nodes for free and rejects older ones', () => {
+    const g = createGame(2);
+    g.apply({ type: 'start' });
+    expect(g.apply({ type: 'place', tool: 'wall', x: 40, y: 40, x2: 60, y2: 40 }).ok).toBe(true);
+    const e = g.state().energy;
+    const wall = g.state().nodes[0];
+    // translate: wall keeps its shape
+    expect(g.apply({ type: 'move', nodeId: wall.id, x: 50, y: 60 }).ok).toBe(true);
+    const moved = g.state().nodes[0];
+    expect([moved.x, moved.y, moved.x2, moved.y2]).toEqual([50, 60, 70, 60]);
+    expect(g.state().energy).toBe(e);
+    // same validation as placing
+    expect(g.apply({ type: 'move', nodeId: wall.id, x: -5, y: 60 }).ok).toBe(false);
+    expect(g.apply({ type: 'move', nodeId: wall.id, x: 50, y: 60, x2: 51, y2: 60 }).ok).toBe(false);
+    expect(g.apply({ type: 'move', nodeId: 999, x: 10, y: 10 }).ok).toBe(false);
+    // a second wall cannot be dragged onto the first, but can be dragged onto its own spot
+    expect(g.apply({ type: 'place', tool: 'wall', x: 100, y: 20, x2: 120, y2: 20 }).ok).toBe(true);
+    const w2 = g.state().nodes[1];
+    expect(g.apply({ type: 'move', nodeId: w2.id, x: 51, y: 60 }).ok).toBe(false);
+    expect(g.apply({ type: 'move', nodeId: w2.id, x: 101, y: 20 }).ok).toBe(true);
+    // after the round has run, the node is locked in place
+    applyActions(g, [{ type: 'endRound' }]);
+    g.apply({ type: 'start' });
+    if (g.state().phase === 'plan') {
+      const r = g.apply({ type: 'move', nodeId: wall.id, x: 30, y: 30 });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/this round/);
+    }
+  }, 30000);
 
   it('inventory tools are free and usable outside the palette', () => {
     const g = createGame(1, undefined, { inventory: { black_hole: 1 } });

@@ -1,4 +1,4 @@
-/** Pointer input: place tools, drag walls, tap nodes to remove (with confirm popover). */
+/** Pointer input: place tools, drag walls; tap a node to remove it, drag a node placed this round to move it. */
 import type { Game, GameState, Node as SimNode, ToolId } from '../sim/types';
 import { computeLetterboxIn, screenToWorld, worldToScreen, type Letterbox, type Rect } from '../render/layout';
 import type { Preview } from '../render/scene';
@@ -69,9 +69,17 @@ export function attachInput(
   uiRoot: HTMLElement,
   cb: InputCallbacks,
 ): InputHandle {
-  let dragStart: { x: number; y: number } | null = null;
+  /** place: dragging out a new tool; node: pressed an existing node (tap = remove popover, drag = move) */
+  type Gesture =
+    | { kind: 'place'; start: { x: number; y: number } }
+    | { kind: 'node'; node: SimNode; startWorld: { x: number; y: number }; sx: number; sy: number; moved: boolean };
+  let gesture: Gesture | null = null;
   let activePointerId: number | null = null;
   let popoverEl: HTMLElement | null = null;
+  const DRAG_THRESHOLD_PX = 8;
+
+  /** Nodes placed during the current planning phase have never been simulated: free to move, full refund. */
+  const isFresh = (node: SimNode, state: GameState) => node.placedRound === state.round;
 
   function removePopover() {
     if (popoverEl) {
@@ -82,16 +90,23 @@ export function attachInput(
 
   function showRemovePopover(node: SimNode, sx: number, sy: number) {
     removePopover();
+    const state = game.state();
+    const def = TOOL_DEFS[node.tool];
+    const fresh = isFresh(node, state);
+    const refund = !fresh ? 'no refund' : node.free ? 'returns to inventory' : `+${def.cost} refund`;
+    const tip = fresh ? 'or drag it to move' : 'placed in an earlier round';
     const rect = canvas.getBoundingClientRect();
     const div = document.createElement('div');
     div.className = 'popover panel layer';
     div.style.left = `${rect.left + sx}px`;
     div.style.top = `${rect.top + sy - 6}px`;
-    div.innerHTML = `<span style="align-self:center;font-size:12px;color:var(--text-dim);white-space:nowrap;">Remove ${TOOL_DEFS[node.tool].name}?</span><button id="pop-yes" class="confirm">Remove</button><button id="pop-no">Cancel</button>`;
+    div.innerHTML = `<span style="align-self:center;font-size:12px;color:var(--text-dim);line-height:1.3;">Remove ${def.name}? <b style="color:var(--text)">${refund}</b><br>${tip}</span><button id="pop-yes" class="confirm">Remove</button><button id="pop-no">Cancel</button>`;
     uiRoot.appendChild(div);
     div.querySelector('#pop-yes')!.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      game.apply({ type: 'remove', nodeId: node.id });
+      const r = game.apply({ type: 'remove', nodeId: node.id });
+      if (!r.ok) cb.onRejected(r.reason ?? 'Cannot remove');
+      cb.onPlaced();
       removePopover();
     });
     div.querySelector('#pop-no')!.addEventListener('click', (ev) => {
@@ -110,26 +125,71 @@ export function attachInput(
     return { world: screenToWorld(sx, sy, lb), lb, state, sx, sy };
   }
 
+  function capture(e: PointerEvent) {
+    activePointerId = e.pointerId;
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+      /* synthetic events may not be capturable */
+    }
+  }
+
+  /** Where a dragged node would land, keeping the grab offset (walls translate as a whole). */
+  function movedTarget(g: Extract<Gesture, { kind: 'node' }>, world: { x: number; y: number }) {
+    const dx = world.x - g.startWorld.x;
+    const dy = world.y - g.startWorld.y;
+    const n = g.node;
+    return {
+      x: n.x + dx,
+      y: n.y + dy,
+      x2: n.x2 != null ? n.x2 + dx : undefined,
+      y2: n.y2 != null ? n.y2 + dy : undefined,
+    };
+  }
+
   function onPointerDown(e: PointerEvent) {
     removePopover();
     const { world, lb, state, sx, sy } = toWorld(e.clientX, e.clientY);
     if (state.phase !== 'plan') return;
-    const tool = cb.getSelectedTool();
-    if (tool) {
-      dragStart = world;
-      activePointerId = e.pointerId;
-      canvas.setPointerCapture(e.pointerId);
+    // Existing nodes take priority over placing, so a node can always be removed or moved.
+    const hit = hitTestNode(state, lb, sx, sy);
+    if (hit) {
+      gesture = { kind: 'node', node: hit, startWorld: world, sx, sy, moved: false };
+      capture(e);
       return;
     }
-    const hit = hitTestNode(state, lb, sx, sy);
-    if (hit) showRemovePopover(hit, sx, sy);
-    else cb.onHint('Select a tool below');
+    const tool = cb.getSelectedTool();
+    if (tool) {
+      gesture = { kind: 'place', start: world };
+      capture(e);
+      return;
+    }
+    cb.onHint('Select a tool below');
   }
 
   function onPointerMove(e: PointerEvent) {
+    const { world, state, sx, sy } = toWorld(e.clientX, e.clientY);
+    if (state.phase !== 'plan') {
+      cb.onPreview(null);
+      return;
+    }
+    if (gesture?.kind === 'node' && activePointerId === e.pointerId) {
+      if (!gesture.moved && Math.hypot(sx - gesture.sx, sy - gesture.sy) > DRAG_THRESHOLD_PX) gesture.moved = true;
+      if (!gesture.moved || !isFresh(gesture.node, state)) {
+        cb.onPreview(null);
+        return;
+      }
+      const t = movedTarget(gesture, world);
+      const n = gesture.node;
+      if (n.tool === 'wall' && t.x2 != null && t.y2 != null) {
+        cb.onPreview({ kind: 'wall', x1: t.x, y1: t.y, x2: t.x2, y2: t.y2, valid: true });
+      } else {
+        cb.onPreview({ kind: 'point', tool: n.tool, x: t.x, y: t.y, radius: TOOL_DEFS[n.tool].radius, valid: true });
+      }
+      return;
+    }
     const tool = cb.getSelectedTool();
-    const { world, state } = toWorld(e.clientX, e.clientY);
-    if (!tool || state.phase !== 'plan') {
+    if (!tool) {
       cb.onPreview(null);
       return;
     }
@@ -137,8 +197,8 @@ export function attachInput(
     const inv = state.inventory[tool] ?? 0;
     const valid = inv > 0 || state.energy >= def.cost;
     if (tool === 'wall') {
-      if (dragStart && activePointerId === e.pointerId) {
-        cb.onPreview({ kind: 'wall', x1: dragStart.x, y1: dragStart.y, x2: world.x, y2: world.y, valid });
+      if (gesture?.kind === 'place' && activePointerId === e.pointerId) {
+        cb.onPreview({ kind: 'wall', x1: gesture.start.x, y1: gesture.start.y, x2: world.x, y2: world.y, valid });
       } else {
         cb.onPreview(null);
       }
@@ -147,7 +207,7 @@ export function attachInput(
     }
   }
 
-  function endDrag(e: PointerEvent, place: boolean) {
+  function endDrag(e: PointerEvent, commit: boolean) {
     if (activePointerId !== e.pointerId) return;
     try {
       canvas.releasePointerCapture(e.pointerId);
@@ -155,23 +215,41 @@ export function attachInput(
       /* already released */
     }
     activePointerId = null;
-    const tool = cb.getSelectedTool();
+    const g = gesture;
+    gesture = null;
+    cb.onPreview(null);
     const { world, state } = toWorld(e.clientX, e.clientY);
-    if (place && tool && state.phase === 'plan' && dragStart) {
-      if (tool === 'wall') {
-        if (Math.hypot(world.x - dragStart.x, world.y - dragStart.y) > 2) {
-          const r = game.apply({ type: 'place', tool: 'wall', x: dragStart.x, y: dragStart.y, x2: world.x, y2: world.y });
-          if (!r.ok) cb.onRejected(r.reason ?? 'Cannot place there');
-          cb.onPlaced();
-        }
-      } else {
-        const r = game.apply({ type: 'place', tool, x: world.x, y: world.y });
+    if (!commit || !g || state.phase !== 'plan') return;
+
+    if (g.kind === 'node') {
+      if (!g.moved) {
+        showRemovePopover(g.node, g.sx, g.sy);
+        return;
+      }
+      if (!isFresh(g.node, state)) {
+        cb.onRejected('Only nodes placed this round can be moved. Tap it to remove.');
+        return;
+      }
+      const t = movedTarget(g, world);
+      const r = game.apply({ type: 'move', nodeId: g.node.id, ...t });
+      if (!r.ok) cb.onRejected(r.reason ?? 'Cannot move there');
+      cb.onPlaced();
+      return;
+    }
+
+    const tool = cb.getSelectedTool();
+    if (!tool) return;
+    if (tool === 'wall') {
+      if (Math.hypot(world.x - g.start.x, world.y - g.start.y) > 2) {
+        const r = game.apply({ type: 'place', tool: 'wall', x: g.start.x, y: g.start.y, x2: world.x, y2: world.y });
         if (!r.ok) cb.onRejected(r.reason ?? 'Cannot place there');
         cb.onPlaced();
       }
+    } else {
+      const r = game.apply({ type: 'place', tool, x: world.x, y: world.y });
+      if (!r.ok) cb.onRejected(r.reason ?? 'Cannot place there');
+      cb.onPlaced();
     }
-    dragStart = null;
-    cb.onPreview(null);
   }
 
   const onPointerUp = (e: PointerEvent) => endDrag(e, true);

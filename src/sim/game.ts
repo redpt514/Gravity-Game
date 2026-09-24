@@ -91,6 +91,28 @@ function inBoard(s: GameState, x: number, y: number): boolean {
 export const createGame = ((levelId: number, seed?: number, opts: GameOptions = {}): Game => {
   let w = newWorld(levelId, seed, opts);
 
+  /** Shared placement geometry checks for place/move. Returns an error string or wall endpoint. */
+  const checkGeometry = (tool: ToolId, x: number, y: number, ax2: number | undefined, ay2: number | undefined, ignoreId: number): string | { x2?: number; y2?: number } => {
+    const s = w.s;
+    if (!inBoard(s, x, y)) return 'position outside board';
+    let x2: number | undefined, y2: number | undefined;
+    if (tool === 'wall') {
+      if (ax2 === undefined || ay2 === undefined) return 'wall needs an end point (x2, y2)';
+      x2 = ax2; y2 = ay2;
+      if (!inBoard(s, x2, y2)) return 'wall endpoint outside board';
+      const len = Math.hypot(x2 - x, y2 - y);
+      if (len < P.wallMinLen) return `wall too short (${len.toFixed(1)} < ${P.wallMinLen})`;
+      if (len > WALL_MAX_LEN) return `wall too long (${len.toFixed(1)} > ${WALL_MAX_LEN})`;
+    }
+    const ax = tool === 'wall' ? (x + x2!) / 2 : x, ay = tool === 'wall' ? (y + y2!) / 2 : y;
+    const clash = s.nodes.find((n) => {
+      if (n.tool !== tool || n.id === ignoreId) return false;
+      const nx = n.x2 !== undefined ? (n.x + n.x2) / 2 : n.x, ny = n.y2 !== undefined ? (n.y + (n.y2 ?? n.y)) / 2 : n.y;
+      return Math.hypot(nx - ax, ny - ay) < P.nodeMinSpacing;
+    });
+    if (clash) return `too close to ${tool} #${clash.id} (min ${P.nodeMinSpacing} apart)`;
+    return { x2, y2 };
+  };
   const toPlan = (): void => {
     const s = w.s;
     if (s.phase === 'intro') { s.phase = 'plan'; }
@@ -154,23 +176,9 @@ export const createGame = ((levelId: number, seed?: number, opts: GameOptions = 
           const inv = s.inventory[a.tool] ?? 0;
           const inPalette = s.level.tools.includes(a.tool);
           if (!inPalette && inv <= 0) return { ok: false, reason: `tool ${a.tool} not available in this level` };
-          if (!inBoard(s, a.x, a.y)) return { ok: false, reason: 'position outside board' };
-          let x2: number | undefined, y2: number | undefined;
-          if (a.tool === 'wall') {
-            if (a.x2 === undefined || a.y2 === undefined) return { ok: false, reason: 'wall needs an end point (x2, y2)' };
-            x2 = a.x2; y2 = a.y2;
-            if (!inBoard(s, x2, y2)) return { ok: false, reason: 'wall endpoint outside board' };
-            const len = Math.hypot(x2 - a.x, y2 - a.y);
-            if (len < P.wallMinLen) return { ok: false, reason: `wall too short (${len.toFixed(1)} < ${P.wallMinLen})` };
-            if (len > WALL_MAX_LEN) return { ok: false, reason: `wall too long (${len.toFixed(1)} > ${WALL_MAX_LEN})` };
-          }
-          const ax = a.tool === 'wall' ? (a.x + x2!) / 2 : a.x, ay = a.tool === 'wall' ? (a.y + y2!) / 2 : a.y;
-          const clash = s.nodes.find((n) => {
-            if (n.tool !== a.tool) return false;
-            const nx = n.x2 !== undefined ? (n.x + n.x2) / 2 : n.x, ny = n.y2 !== undefined ? (n.y + (n.y2 ?? n.y)) / 2 : n.y;
-            return Math.hypot(nx - ax, ny - ay) < P.nodeMinSpacing;
-          });
-          if (clash) return { ok: false, reason: `too close to ${a.tool} #${clash.id} (min ${P.nodeMinSpacing} apart)` };
+          const geo = checkGeometry(a.tool, a.x, a.y, a.x2, a.y2, -1);
+          if (typeof geo === 'string') return { ok: false, reason: geo };
+          const { x2, y2 } = geo;
           const free = inv > 0;
           if (!free && s.energy < def.cost) return { ok: false, reason: `not enough energy (${s.energy} < ${def.cost})` };
           if (free) s.inventory[a.tool] = inv - 1; else s.energy -= def.cost;
@@ -193,9 +201,28 @@ export const createGame = ((levelId: number, seed?: number, opts: GameOptions = 
           const n = s.nodes[i];
           s.nodes.splice(i, 1);
           if (n.placedRound === s.round) {
+            // Placed during this planning phase and never simulated: full refund.
             if (n.free) s.inventory[n.tool] = (s.inventory[n.tool] ?? 0) + 1;
-            else s.energy += Math.floor(TOOL_DEFS[n.tool].cost * 0.5);
+            else s.energy += TOOL_DEFS[n.tool].cost;
           }
+          computeField(w);
+          return { ok: true };
+        }
+        case 'move': {
+          if (s.phase === 'intro' || s.phase === 'roundEnd') toPlan();
+          if (s.phase !== 'plan') return { ok: false, reason: `can only move in plan phase (phase=${s.phase})` };
+          const n = s.nodes.find((q) => q.id === a.nodeId);
+          if (!n) return { ok: false, reason: `no node ${a.nodeId}` };
+          if (n.placedRound !== s.round) return { ok: false, reason: 'only nodes placed this round can be moved' };
+          let mx2 = a.x2, my2 = a.y2;
+          if (n.tool === 'wall' && (mx2 === undefined || my2 === undefined)) {
+            // translate the wall, keeping its shape
+            mx2 = a.x + (n.x2! - n.x); my2 = a.y + (n.y2! - n.y);
+          }
+          const geo = checkGeometry(n.tool, a.x, a.y, mx2, my2, n.id);
+          if (typeof geo === 'string') return { ok: false, reason: geo };
+          n.x = a.x; n.y = a.y;
+          if (n.tool === 'wall') { n.x2 = geo.x2; n.y2 = geo.y2; }
           computeField(w);
           return { ok: true };
         }
@@ -252,7 +279,7 @@ export function helpText(s: GameState): string {
     + ' (free uses, added to state.inventory; carry them into another level with createGame(levelId, seed, { inventory }))');
   lines.push('SCORE: clouds x' + P.scoreCloud + ', stars x' + P.scoreStar + ', supernovae x' + P.scoreNova + ', +1 per element produced, +'
     + P.scorePerEnergy + ' per unspent energy when you win.');
-  lines.push('LOOP: plan (place/remove nodes, removal same round refunds 50%) -> endRound -> sim runs -> goals checked, income paid -> next plan. Miss a goal by its round = lose.');
+  lines.push('LOOP: plan (place/remove nodes, nodes placed this round can be moved for free or removed for a full refund; older nodes can be removed without refund) -> endRound -> sim runs -> goals checked, income paid -> next plan. Miss a goal by its round = lose.');
   const avail = new Set<ToolId>([...L.tools, ...(Object.keys(s.inventory) as ToolId[]).filter((k) => (s.inventory[k] ?? 0) > 0)]);
   lines.push('TOOLS:');
   for (const t of avail) {
@@ -260,7 +287,7 @@ export function helpText(s: GameState): string {
     const inv = s.inventory[t] ? ` (free x${s.inventory[t]})` : '';
     lines.push(`  ${t}: cost ${d.cost}${inv}, radius ${d.radius}, ${d.durationRounds === null ? 'permanent' : d.durationRounds + ' round'}. ${d.description}`);
   }
-  lines.push('ACTIONS (JSON): {"type":"place","tool":"repulsor","x":80,"y":45} | wall needs "x2","y2" (length ${P.wallMinLen}-${P.wallMaxLen}) | nodes of one tool must be ${P.nodeMinSpacing}+ apart | {"type":"remove","nodeId":1} | {"type":"endRound"} | {"type":"restart"}');
+  lines.push(`ACTIONS (JSON): {"type":"place","tool":"repulsor","x":80,"y":45} | wall needs "x2","y2" (length ${P.wallMinLen}-${P.wallMaxLen}) | nodes of one tool must be ${P.nodeMinSpacing}+ apart | {"type":"remove","nodeId":1} | {"type":"move","nodeId":1,"x":90,"y":40} (this round's nodes only; walls keep their shape unless x2,y2 given) | {"type":"endRound"} | {"type":"restart"}`);
   return lines.join('\n');
 }
 

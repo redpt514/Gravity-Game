@@ -374,6 +374,19 @@ class MockGame implements Game {
         this.log.push(`Placed ${a.tool}.`);
         return { ok: true };
       }
+      case 'move': {
+        this.dismissToPlay();
+        const node = this.nodes.find((n) => n.id === a.nodeId);
+        if (!node) return { ok: false, reason: 'no such node' };
+        if (node.placedRound !== this.round) return { ok: false, reason: 'only nodes placed this round can be moved' };
+        if (node.x2 != null && node.y2 != null) {
+          node.x2 = a.x2 ?? a.x + (node.x2 - node.x);
+          node.y2 = a.y2 ?? a.y + (node.y2 - node.y);
+        }
+        node.x = a.x;
+        node.y = a.y;
+        return { ok: true };
+      }
       case 'remove': {
         this.dismissToPlay();
         const idx = this.nodes.findIndex((n) => n.id === a.nodeId);
@@ -383,7 +396,7 @@ class MockGame implements Game {
           if (node.free) {
             this.inventory[node.tool] = (this.inventory[node.tool] ?? 0) + 1;
           } else {
-            this.energy += Math.floor(this.toolCost(node.tool) * 0.5);
+            this.energy += this.toolCost(node.tool);
           }
         }
         this.nodes.splice(idx, 1);

@@ -50,6 +50,9 @@ Contract: `src/sim/types.ts`. UI only reads `GameState` and calls `Game.apply/st
 `intro → plan (place nodes, spend energy) → running (ticksPerRound) → roundEnd (goals w/ byRound
 checked; income paid) → plan … → won/lost`. Losing a goal by its round = level lost, restart.
 
+During plan, nodes placed this round can be dragged to move them for free or tapped to remove them for a full
+refund. Nodes from earlier rounds are locked in place and can only be removed, with no refund.
+
 ## Levels 1–5 (prototype scope; reference lines in `tests/solutions.ts`, balance checks in `tests/balance.test.ts`)
 | # | Name | New idea | Goals (by round) | Rounds | Energy (start/+income) | Reference line → win round |
 |---|------|----------|------------------|--------|------|------|

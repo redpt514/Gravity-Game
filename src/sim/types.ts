@@ -158,7 +158,8 @@ export interface GameState {
 
 export type Action =
   | { type: 'place'; tool: ToolId; x: number; y: number; x2?: number; y2?: number }
-  | { type: 'remove'; nodeId: number }        // refunds 50% if placed this round
+  | { type: 'remove'; nodeId: number }        // full refund if placed this round (never simulated); no refund otherwise
+  | { type: 'move'; nodeId: number; x: number; y: number; x2?: number; y2?: number } // free; only nodes placed this round
   | { type: 'endRound' }                      // intro->plan, roundEnd->plan (next round), plan->running; step()/runRound() advance ticksPerRound
   | { type: 'start' }                         // dismiss intro/roundEnd card -> plan (place/remove/endRound also do this)
   | { type: 'restart' };

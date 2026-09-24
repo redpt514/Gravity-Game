@@ -154,11 +154,16 @@ function createSession(
     },
   });
 
+  let editHintShown = false;
   const input = attachInput(sceneCanvas, game, uiRoot, {
     getSelectedTool: () => uiState.selectedTool,
     getBoardRect: () => boardRect,
     onPlaced() {
       /* keep the tool selected so the player can place several in a row */
+      if (!editHintShown && game.state().nodes.some((n) => n.placedRound === game.state().round)) {
+        editHintShown = true;
+        hud.toast('Tip: tap a node to remove it, or drag it to move it before you run the round', 'info');
+      }
     },
     onPreview(p) {
       preview = p;
