@@ -1,4 +1,4 @@
-# Gravity Game — Project Plan (v0.1, levels 1–5 prototype)
+# Gravity Game — Project Plan (v0.2: adaptive board, procedural levels 4+)
 
 ## Pitch
 Reverse tower defense in a galaxy nursery. A gently pulsing gravity landscape is
@@ -17,7 +17,7 @@ sim is grid-field based, not N-body.
 ## Architecture
 ```
 src/sim      pure TS, deterministic, no DOM. Game interface in types.ts (the contract)
-src/levels   data for levels 1–5, goal evaluation
+src/levels   handcrafted levels 1–3, goal evaluation, procedural generator + calibration bot (4+), catalog, worker
 src/render   WebGL2 background shader (pulsing gravity field), particle + body renderer
 src/ui       HUD (energy, round, goals), tool palette, scoreboard, intro/round-end cards
 scripts/     play.ts — headless CLI (JSON lines) so agents/tests can play levels
@@ -26,7 +26,15 @@ tests/       vitest: determinism, lifecycle thresholds, level solvability (scrip
 Contract: `src/sim/types.ts`. UI only reads `GameState` and calls `Game.apply/step`.
 
 ## Simulation model (mobile-cheap; numbers live in `src/sim/params.ts`)
-- Board 160×90 world units; 64×36 grid (2.5-unit cells). Thresholds scale with the level's mean density ρ̄ = particles / cells.
+- **Adaptive board**: `createGame(level, seed, { world })` takes the board size from `worldSizeForAspect(aspect)`
+  (`src/sim/worldSize.ts`): area fixed at 160×90 = 14400 units², 2.5-unit cells, aspect quantized to 0.1 in
+  [0.55, 2.4], so particle density and difficulty stay comparable. Default (tests, scripted solutions) is the legacy
+  160×90 board with a 64×36 grid. All sim code reads `state.width/height/gridW/gridH`; spawn, ambient pull, current
+  and edges scale with the board. Thresholds scale with the level's mean density ρ̄ = particles / cells.
+- On tall boards the current is scaled by width/height so its fastest edge (the sides) matches a wide board's top.
+  No cloud condenses in a level's first 15 ticks (random spawn clumps are not clouds).
+- `forceAt(state, x, y)` (`src/sim/force.ts`) is the acceleration a free particle feels (gas potential gradient incl.
+  ambient, bodies, nodes, pressure; current; edge spring). The particle integrator uses the same function.
 - **Gas current**: divergence-free counter-clockwise ellipse around the centre (top flows left, right flows up),
   fading toward the corners. Obstacles dam it: gas piles up on the *upstream* side.
 - `field = ambient(centre pull, pulsing, ripples) + G·blur(gas above 1.9ρ̄ + 0.1·body mass) + Σ node kernels`.
@@ -53,7 +61,27 @@ checked; income paid) → plan … → won/lost`. Losing a goal by its round = l
 During plan, nodes placed this round can be dragged to move them for free or tapped to remove them for a full
 refund. Nodes from earlier rounds are locked in place and can only be removed, with no refund.
 
-## Levels 1–5 (prototype scope; reference lines in `tests/solutions.ts`, balance checks in `tests/balance.test.ts`)
+## Levels
+**Progression**: levels 1–3 are handcrafted (below); 4+ are procedural (`src/levels/procgen.ts`), generated per board
+size and cached by `levelCacheKey(n, world)` (`src/levels/catalog.ts`: `getLevelDef(n, world)`; the UI generates them
+in `procgen.worker.ts`). Handcrafted 4–5 below stay in `LEVELS` for tests/eval but are no longer in the progression.
+
+**Generator** (deterministic in (n, world), ~3.5–4.5 s in node): difficulty ramps with n — rounds 4→7, energy
+105/+55 → 75/+35, current 1.0→1.5× with clockwise flips from L6, 2700→3400 particles, helium-rich gas from L6.
+Goals unlock by tier: L4–5 stars + He; L6–7 C+O / red giants; L8+ supernovae, white dwarfs, iron, mixed (3 goals from
+L10), always plus an early "clouds by round 2–3" goal. Palette: repulsor/wall/lens/pulse, red matter from L8, black hole
+from L11; rewards every few levels. Names/intros from word lists.
+
+**Calibration** (always winnable): the heuristic bot (`src/levels/bot.ts`) plays the rolled level with 3 strategy
+variants (`single` dam→squeeze→lens line, `twin` two dams, `pinch` L1-style), screened after 2 rounds, best continued.
+It plans in a canonical frame (long edge, current direction), so it works on tall/wide boards and reversed currents.
+Per-round metrics are sampled exactly where the game evaluates goals; each goal = 80→90% of the bot's best (by n),
+due the round the bot reached it (+1 on L4–5), and the level is trimmed to the last goal's round. Goals do not affect
+the sim, so the bot's action line (`level.solution`, `npm run play -- --level N --aspect A --solution`) provably wins;
+place-nothing is verified to lose by a real run (else goals tighten to 100%, then the seed is re-rolled).
+`tests/procgen-*.test.ts`: L4–8 at aspects 1.8 and 0.6 won by the line, lost idle, < 8 s each.
+
+### Handcrafted levels (reference lines in `tests/solutions.ts`, balance checks in `tests/balance.test.ts`)
 | # | Name | New idea | Goals (by round) | Rounds | Energy (start/+income) | Reference line → win round |
 |---|------|----------|------------------|--------|------|------|
 | 1 | First Light | repulsor, density | 1 cloud r2 | 2 | 70/+30 | repulsors (80,22)+(80,68) → R1 |
@@ -73,5 +101,5 @@ Reward tools land in the won state's `inventory`; pass them on with `createGame(
 4. **M4 refine** one pass on top critiques → commit. **PAUSE for human review.**
 
 ## Later (not this session)
-Levels 6+, tool economy/meta-progression, Capacitor build, audio, saves, leaderboards,
-procedural level generator (levels 1–5 are hand-tuned seeds of the generator's params).
+Tool economy/meta-progression, Capacitor build, audio, saves, leaderboards; a smarter calibration bot
+(lookahead per round) so late procedural levels demand more than the reference line.

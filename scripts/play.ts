@@ -1,11 +1,16 @@
 /**
  * Headless CLI.
- *   npm run play -- --level N [--seed S] [--auto] [--ascii]
+ *   npm run play -- --level N [--seed S] [--aspect A] [--auto] [--ascii]
+ * Levels 1-3 are handcrafted; N >= 4 is generated for the board (takes a few seconds, see src/levels/procgen.ts).
+ * --solution replays a procedural level's calibration line (level.solution).
+ * --aspect A (board width/height, e.g. 0.6 for a phone in portrait) sizes the board like the UI does; default 160x90.
  * REPL mode: one JSON per stdin line: an Action, {"type":"state"[,"full":true]}, {"type":"help"}, {"type":"ascii"}.
  * Prints one compact JSON line per input. Intro/round-end cards are auto-dismissed, so you are always in
  * plan phase until the level is won/lost; {"type":"endRound"} runs the whole round.
  */
 import { createGame, helpText } from '../src/sim/game.ts';
+import { getLevelDef, HANDCRAFTED_COUNT } from '../src/levels/catalog.ts';
+import { DEFAULT_WORLD, worldSizeForAspect } from '../src/sim/worldSize.ts';
 import { canCondenseAt } from '../src/sim/bodies.ts';
 import type { Action, BodyKind, Game, GameState, ToolId } from '../src/sim/types.ts';
 import { TOOL_DEFS } from '../src/sim/tools.ts';
@@ -18,6 +23,11 @@ const levelId = Number(arg('--level') ?? 1);
 const seedArg = arg('--seed');
 const seed = seedArg !== undefined ? Number(seedArg) : undefined;
 const ascii = flag('--ascii');
+const aspectArg = arg('--aspect');
+const world = aspectArg !== undefined ? worldSizeForAspect(Number(aspectArg)) : DEFAULT_WORLD;
+const makeGame = (): Game => createGame(levelId, seed, {
+  world, ...(levelId > HANDCRAFTED_COUNT ? { level: getLevelDef(levelId, world) } : {}),
+});
 
 const r1 = (v: number) => Math.round(v * 10) / 10;
 
@@ -149,7 +159,14 @@ function autoPlay(g: Game): boolean {
 }
 
 function main(): void {
-  const g = createGame(levelId, seed);
+  const g = makeGame();
+  if (flag('--solution')) {
+    // replay the calibration bot's line of a procedural level
+    for (const a of g.state().level.solution ?? []) { if (g.state().phase === 'won' || g.state().phase === 'lost') break; runAction(g, a); }
+    const s = g.state();
+    process.stdout.write(JSON.stringify({ result: s.phase, level: levelId, round: s.round, goals: summary(g).goals }) + '\n');
+    process.exit(s.phase === 'won' ? 0 : 1);
+  }
   if (flag('--auto')) {
     const won = autoPlay(g);
     const s = g.state();

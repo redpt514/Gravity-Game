@@ -63,3 +63,15 @@ describe('forceAt', () => {
     expect(forceAt(s, 48, 45, out)).toBe(out);
   });
 });
+
+describe('level catalog', () => {
+  it('levels 1-3 are handcrafted and cache keys depend on n and board size', async () => {
+    const { HANDCRAFTED_COUNT, getLevelDef, levelCacheKey } = await import('../src/levels/catalog.ts');
+    expect(HANDCRAFTED_COUNT).toBe(3);
+    for (const n of [1, 2, 3]) expect(getLevelDef(n, DEFAULT_WORLD)).toBe(getLevel(n));
+    const a = worldSizeForAspect(0.6), b = worldSizeForAspect(2.2);
+    expect(levelCacheKey(4, a)).not.toBe(levelCacheKey(4, b));
+    expect(levelCacheKey(4, a)).not.toBe(levelCacheKey(5, a));
+    expect(levelCacheKey(4, a)).toBe(levelCacheKey(4, worldSizeForAspect(0.61)));
+  });
+});
