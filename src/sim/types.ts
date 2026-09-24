@@ -67,6 +67,10 @@ export interface Node {
   x2?: number; y2?: number;      // wall endpoint
   roundsLeft: number | null;     // null = permanent
   placedRound: number;
+  /** black_hole only: current mass (grows as it swallows) */
+  mass?: number;
+  /** true if placed from the free reward inventory (refund goes back to inventory) */
+  free?: boolean;
 }
 
 export type GoalType =
@@ -83,6 +87,8 @@ export interface Goal {
   count: number;
   kind?: BodyKind;
   el?: Element;
+  /** element goals: if set, sum of these elements (e.g. ['C','O']); overrides el */
+  els?: Element[];
   /** Must be satisfied by END of this round (1-based). Level is lost if not. */
   byRound: number;
   label: string;   // player-facing, e.g. "Form 1 particle cloud"
@@ -101,6 +107,8 @@ export interface LevelDef {
   startingEnergy: number;
   incomePerRound: number;
   ambientGravity: number;     // baseline pull toward board center, 0..1
+  /** strength multiplier of the counter-clockwise gas current around the centre (default 1) */
+  swirl?: number;
   tools: ToolId[];            // palette for this level
   goals: Goal[];              // all must be met by their byRound
   /** Free reward tools granted on win (added to inventory for later levels) */
@@ -135,6 +143,10 @@ export interface GameState {
   /** gravity potential grid, row-major, GRID_W x GRID_H, higher = stronger pull */
   field: Float32Array;
   gridW: number; gridH: number;
+  /** smoothed free-gas density per cell (particles/cell), same layout as field */
+  density?: Float32Array;
+  /** density at which a cloud condenses (compare with density[]) */
+  cloudThreshold?: number;
   width: number; height: number;   // world units
   scoreboard: Scoreboard;
   goals: { goal: Goal; current: number; met: boolean }[];
@@ -145,7 +157,8 @@ export interface GameState {
 export type Action =
   | { type: 'place'; tool: ToolId; x: number; y: number; x2?: number; y2?: number }
   | { type: 'remove'; nodeId: number }        // refunds 50% if placed this round
-  | { type: 'endRound' }                      // advance sim by ticksPerRound
+  | { type: 'endRound' }                      // intro->plan, roundEnd->plan (next round), plan->running; step()/runRound() advance ticksPerRound
+  | { type: 'start' }                         // dismiss intro/roundEnd card -> plan (place/remove/endRound also do this)
   | { type: 'restart' };
 
 export interface ActionResult { ok: boolean; reason?: string }
