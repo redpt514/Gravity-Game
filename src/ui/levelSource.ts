@@ -36,11 +36,36 @@ function writeLocal(key: string, level: LevelDef) {
 }
 
 let worker: Worker | null = null;
-function getWorker(): Worker {
+let workerBroken = false;
+function getWorker(): Worker | null {
+  if (workerBroken) return null;
   if (!worker) {
-    worker = new Worker(new URL('../levels/procgen.worker.ts', import.meta.url), { type: 'module' });
+    try {
+      worker = new Worker(new URL('../levels/procgen.worker.ts', import.meta.url), { type: 'module' });
+      worker.addEventListener('error', () => {
+        // e.g. a sandbox that blocks workers: everything pending falls back to the main thread
+        workerBroken = true;
+        worker = null;
+        for (const [key, fb] of fallbacks) {
+          fallbacks.delete(key);
+          fb();
+        }
+      });
+    } catch {
+      workerBroken = true;
+      worker = null;
+    }
   }
   return worker;
+}
+/** per-key main-thread fallbacks, run if the worker dies before answering */
+const fallbacks = new Map<string, () => void>();
+
+/** Main-thread generation (blocks for a few seconds); only used when workers are unavailable. */
+async function generateOnMainThread(n: number, world: WorldSize): Promise<LevelDef> {
+  const { getLevelDef } = await import('../levels/catalog');
+  await new Promise((r) => setTimeout(r, 50)); // let the "Charting galaxy…" card paint first
+  return getLevelDef(n, world);
 }
 
 /** Cache-only lookup (memory, then localStorage); never triggers generation. */
@@ -67,34 +92,38 @@ export function getOrGenerate(n: number, world: WorldSize): Promise<LevelDef> {
   const inflight = pending.get(key);
   if (inflight) return inflight;
   const p = new Promise<LevelDef>((resolve) => {
+    const finish = (level: LevelDef) => {
+      pending.delete(key);
+      fallbacks.delete(key);
+      memCache.set(key, level);
+      writeLocal(key, level);
+      resolve(level);
+      for (const l of listeners) l();
+    };
+    const runFallback = () => {
+      generateOnMainThread(n, world).then(finish, (err) => {
+        console.warn('[levelSource] main-thread generation failed for level', n, err);
+        finish(placeholderLevel(n));
+      });
+    };
     const w = getWorker();
+    if (!w) {
+      runFallback();
+      return;
+    }
+    fallbacks.set(key, () => {
+      w.removeEventListener('message', onMsg);
+      runFallback();
+    });
     const onMsg = (ev: MessageEvent<{ n: number; key: string; level?: LevelDef; error?: string }>) => {
       if (ev.data.key !== key) return;
       w.removeEventListener('message', onMsg);
-      pending.delete(key);
       if (ev.data.level) {
-        memCache.set(key, ev.data.level);
-        writeLocal(key, ev.data.level);
-        resolve(ev.data.level);
-        for (const l of listeners) l();
+        finish(ev.data.level);
       } else {
         console.warn('[levelSource] generation failed for level', n, ev.data.error);
         // never leave the caller hanging: fall through with a minimal placeholder
-        resolve({
-          id: n,
-          name: `Level ${n}`,
-          intro: 'A region of the nursery.',
-          seed: n,
-          particleCount: 1800,
-          initialMix: { H: 1 },
-          rounds: 3,
-          ticksPerRound: 600,
-          startingEnergy: 80,
-          incomePerRound: 40,
-          ambientGravity: 0.3,
-          tools: ['repulsor', 'wall'],
-          goals: [{ type: 'clouds', count: 1, byRound: 3, label: 'Form 1 particle cloud' }],
-        });
+        finish(placeholderLevel(n));
       }
     };
     w.addEventListener('message', onMsg);
@@ -102,6 +131,24 @@ export function getOrGenerate(n: number, world: WorldSize): Promise<LevelDef> {
   });
   pending.set(key, p);
   return p;
+}
+
+function placeholderLevel(n: number): LevelDef {
+  return {
+    id: n,
+    name: `Level ${n}`,
+    intro: 'A region of the nursery.',
+    seed: n,
+    particleCount: 1800,
+    initialMix: { H: 1 },
+    rounds: 3,
+    ticksPerRound: 600,
+    startingEnergy: 80,
+    incomePerRound: 40,
+    ambientGravity: 0.3,
+    tools: ['repulsor', 'wall'],
+    goals: [{ type: 'clouds', count: 1, byRound: 3, label: 'Form 1 particle cloud' }],
+  };
 }
 
 /** Fire-and-forget: used to pre-chart upcoming levels without the player waiting on them. */

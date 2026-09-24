@@ -113,14 +113,11 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
 
   const toaster = createToastManager(el.toasts);
 
-  let goalsOpen = false;
+  // Goals start expanded so the player sees what to do; the chip collapses them.
+  let goalsOpen = true;
   let menuOpen = false;
-  function closeDropdowns() {
-    goalsOpen = false;
-    menuOpen = false;
-    el.goalsDrawer.hidden = true;
-    el.menuDrawer.hidden = true;
-  }
+  el.goalsDrawer.hidden = false;
+  el.menuDrawer.hidden = true;
   el.goalsChip.addEventListener('click', (ev) => {
     ev.stopPropagation();
     goalsOpen = !goalsOpen;
@@ -135,7 +132,11 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     el.menuDrawer.hidden = !menuOpen;
     el.goalsDrawer.hidden = true;
   });
-  root.addEventListener('click', () => closeDropdowns());
+  // Outside clicks close the menu only; the goals list stays until its chip is tapped.
+  root.addEventListener('click', () => {
+    menuOpen = false;
+    el.menuDrawer.hidden = true;
+  });
   el.goalsDrawer.addEventListener('click', (ev) => ev.stopPropagation());
   el.menuDrawer.addEventListener('click', (ev) => ev.stopPropagation());
 

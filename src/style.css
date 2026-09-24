@@ -210,6 +210,11 @@ a {
   gap: 8px;
 }
 
+/* author display:flex above would otherwise override the hidden attribute */
+.dropdown[hidden] {
+  display: none;
+}
+
 .dropdown.goals-drawer {
   left: 8px;
   right: auto;

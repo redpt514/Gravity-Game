@@ -306,6 +306,17 @@ async function boot() {
     return { x: 0, y, w, h: Math.max(40, bottom - y) };
   }
 
+  /** Build the HUD DOM shell (throwaway callbacks) to measure this viewport's top/bottom bar
+   * heights, and size the world to exactly fill the space between them (worldSizeForAspect keeps
+   * board area constant so difficulty stays comparable). Leaves the shell in uiRoot; callers
+   * replace it. */
+  function measureGameWorld() {
+    uiRoot.innerHTML = '';
+    createHud(uiRoot, NOOP_HUD_CALLBACKS);
+    const boardRect = computeBoardRect();
+    return worldSizeForAspect(boardRect.w / boardRect.h);
+  }
+
   function showLevelSelect() {
     if (session) {
       backdropGame = session.game;
@@ -318,7 +329,9 @@ async function boot() {
     }
     sceneCanvas.style.display = 'none';
     const unlocked = getUnlocked();
-    const world = worldSizeForAspect(window.innerWidth / window.innerHeight);
+    // Same world size startLevel() will use (measured off a throwaway HUD shell), so the
+    // procedural previews shown here are exactly the levels the player gets.
+    const world = measureGameWorld();
     const handcrafted = levelSource.handcraftedCount();
     levelSource.prefetch(unlocked + 1, world);
     levelSource.prefetch(unlocked + 2, world);
@@ -344,9 +357,7 @@ async function boot() {
     // Build the HUD DOM shell first (throwaway callbacks) purely to measure this viewport's
     // compact top/bottom bar heights, then size the world to exactly fill the space between
     // them (worldSizeForAspect keeps board area constant so difficulty stays comparable).
-    createHud(uiRoot, NOOP_HUD_CALLBACKS);
-    const boardRect = computeBoardRect();
-    const world = worldSizeForAspect(boardRect.w / boardRect.h);
+    const world = measureGameWorld();
 
     const handcrafted = levelSource.handcraftedCount();
     const inventory = loadInventory();
