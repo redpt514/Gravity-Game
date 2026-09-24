@@ -113,6 +113,8 @@ export interface LevelDef {
   goals: Goal[];              // all must be met by their byRound
   /** Free reward tools granted on win (added to inventory for later levels) */
   rewards?: Partial<Record<ToolId, number>>;
+  /** procedural levels: the calibration bot's winning line (tests/solutions.ts style: each endRound runs one round) */
+  solution?: Action[];
 }
 
 export interface NovaEvent { round: number; tick: number; x: number; y: number; mass: number; kind: 'supernova' | 'collapse' }
