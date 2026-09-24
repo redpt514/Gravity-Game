@@ -3,6 +3,7 @@ import type { Body, BodyKind, GameState, Node as SimNode, ToolId } from '../sim/
 import { computeLetterboxIn, worldToScreen, type Letterbox, type Rect } from './layout';
 import { ELEMENT_COLOR, TOOL_COLOR, TOOL_DEFS } from './toolDefs';
 import { P } from '../sim/params';
+import { forceAt } from '../sim/force';
 
 /** Live placement preview drawn by input.ts while the player is dragging a tool into place. */
 export type Preview =
@@ -146,52 +147,63 @@ function drawBodyBadge(ctx: CanvasRenderingContext2D, b: Body, x: number, y: num
   ctx.restore();
 }
 
-/** Sparse curved arrows showing the counter-clockwise gas current (see level.swirl,
- * src/sim/particles.ts currentAt — reimplemented here from live params since that function
- * needs the sim's internal World, not just GameState). */
-function currentVec(state: GameState, x: number, y: number): { x: number; y: number } {
-  const a = state.width / 2, b = state.height / 2;
-  const dx = x - a, dy = y - b;
-  const u = (dx * dx) / (a * a) + (dy * dy) / (b * b);
-  const sw = P.swirl * (state.level.swirl ?? 1);
-  const u0 = P.swirlFadeStart, u1 = P.swirlFadeEnd;
-  const su = u <= u0 ? sw : u >= u1 ? 0 : (sw * (u1 - u)) / (u1 - u0);
-  return { x: (su * dy) / b, y: (-su * dx * b) / (a * a) };
-}
+interface ArrowSample { x: number; y: number; ang: number; len: number; alpha: number }
 
-function drawCurrentArrows(ctx: CanvasRenderingContext2D, state: GameState, lb: Letterbox) {
-  const cols = 9, rows = 6;
-  ctx.save();
-  ctx.lineWidth = 1.3;
-  ctx.lineCap = 'round';
+/** Gravity-field arrows sampled from forceAt (src/sim/force.ts): the same acceleration a free
+ * particle feels right now (field gradient incl. bodies + nodes + ambient, plus the gas current),
+ * so they bend into stars/clouds/black holes and away from repulsors/walls. Sampled on a grid of
+ * ~1 arrow per ARROW_SPACING_WORLD world units; length/opacity scale with log(magnitude) since
+ * raw accelerations span several orders of magnitude near a strong well vs open space. */
+const ARROW_SPACING_WORLD = 7;
+const ARROW_MAG_SCALE = 200;
+
+function sampleArrows(state: GameState): ArrowSample[] {
+  const cols = Math.max(4, Math.round(state.width / ARROW_SPACING_WORLD));
+  const rows = Math.max(3, Math.round(state.height / ARROW_SPACING_WORLD));
+  const out: ArrowSample[] = [];
+  const v = { x: 0, y: 0 };
   for (let j = 0; j < rows; j++) {
     for (let i = 0; i < cols; i++) {
       const wx = ((i + 0.5) / cols) * state.width;
       const wy = ((j + 0.5) / rows) * state.height;
-      const v = currentVec(state, wx, wy);
+      forceAt(state, wx, wy, v);
       const mag = Math.hypot(v.x, v.y);
-      if (mag < 1e-5) continue;
-      const norm = Math.min(1, mag / (P.swirl * 0.85));
-      const ang = Math.atan2(v.y, v.x);
-      const len = 3 + norm * 5;
-      const p0 = worldToScreen(wx, wy, lb);
-      const p1 = worldToScreen(wx + Math.cos(ang) * len, wy + Math.sin(ang) * len, lb);
-      const perp = ang + Math.PI / 2;
-      const midx = (p0.x + p1.x) / 2 + Math.cos(perp) * 4;
-      const midy = (p0.y + p1.y) / 2 + Math.sin(perp) * 4;
-      ctx.strokeStyle = `rgba(150,200,255,${0.14 + 0.16 * norm})`;
-      ctx.beginPath();
-      ctx.moveTo(p0.x, p0.y);
-      ctx.quadraticCurveTo(midx, midy, p1.x, p1.y);
-      ctx.stroke();
-      const ha = ang + 2.6, hb = ang - 2.6;
-      ctx.beginPath();
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p1.x + Math.cos(ha) * 3, p1.y + Math.sin(ha) * 3);
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p1.x + Math.cos(hb) * 3, p1.y + Math.sin(hb) * 3);
-      ctx.stroke();
+      if (mag < 1e-7) continue;
+      const norm = Math.log(1 + mag * ARROW_MAG_SCALE);
+      out.push({
+        x: wx,
+        y: wy,
+        ang: Math.atan2(v.y, v.x),
+        len: 3 + Math.min(9, norm * 3.2),
+        alpha: Math.min(0.42, 0.08 + norm * 0.12),
+      });
     }
+  }
+  return out;
+}
+
+function drawGravityArrows(ctx: CanvasRenderingContext2D, arrows: ArrowSample[], lb: Letterbox) {
+  ctx.save();
+  ctx.lineWidth = 1.3;
+  ctx.lineCap = 'round';
+  for (const a of arrows) {
+    const p0 = worldToScreen(a.x, a.y, lb);
+    const p1 = worldToScreen(a.x + Math.cos(a.ang) * a.len, a.y + Math.sin(a.ang) * a.len, lb);
+    const perp = a.ang + Math.PI / 2;
+    const midx = (p0.x + p1.x) / 2 + Math.cos(perp) * 3;
+    const midy = (p0.y + p1.y) / 2 + Math.sin(perp) * 3;
+    ctx.strokeStyle = `rgba(150,200,255,${a.alpha})`;
+    ctx.beginPath();
+    ctx.moveTo(p0.x, p0.y);
+    ctx.quadraticCurveTo(midx, midy, p1.x, p1.y);
+    ctx.stroke();
+    const ha = a.ang + 2.6, hb = a.ang - 2.6;
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p1.x + Math.cos(ha) * 3, p1.y + Math.sin(ha) * 3);
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p1.x + Math.cos(hb) * 3, p1.y + Math.sin(hb) * 3);
+    ctx.stroke();
   }
   ctx.restore();
 }
@@ -352,6 +364,9 @@ export function createSceneRenderer(canvas: HTMLCanvasElement): SceneRenderer {
   let cssH = canvas.clientHeight || 1;
   let dpr = 1;
   let lb: Letterbox = { x: 0, y: 0, w: cssW, h: cssH, scale: 1 };
+  let arrows: ArrowSample[] = [];
+  let arrowFrame = 0;
+  const ARROW_RECOMPUTE_EVERY = 6;
 
   function resize(w: number, h: number, ratio: number) {
     cssW = w;
@@ -376,8 +391,10 @@ export function createSceneRenderer(canvas: HTMLCanvasElement): SceneRenderer {
     ctx.lineWidth = 1;
     ctx.strokeRect(lb.x + 0.5, lb.y + 0.5, lb.w - 1, lb.h - 1);
 
-    // gas current + cloud-threshold shading (drawn under particles/bodies)
-    drawCurrentArrows(ctx, state, lb);
+    // gravity arrows + cloud-threshold shading (drawn under particles/bodies)
+    if (arrowFrame % ARROW_RECOMPUTE_EVERY === 0) arrows = sampleArrows(state);
+    arrowFrame++;
+    drawGravityArrows(ctx, arrows, lb);
     drawDensityContour(ctx, state, lb);
 
     // particles
