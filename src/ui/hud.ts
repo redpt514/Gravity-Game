@@ -1,11 +1,14 @@
 /** HUD: top bar, goals, tool palette, run/progress control, intro/round-end/won/lost cards. */
-import type { GameState, ToolId } from '../sim/types';
+import type { Goal, GameState, ToolId } from '../sim/types';
 import { TOOL_DEFS } from '../render/toolDefs';
+import { P } from '../sim/params';
+import { createToastManager } from './toast';
 
 export interface HudUiState {
   selectedTool: ToolId | null;
   speed: 1 | 2;
   scoreboardOpen: boolean;
+  logOpen: boolean;
 }
 
 export interface HudCallbacks {
@@ -13,10 +16,12 @@ export interface HudCallbacks {
   onStart(): void; // Action{type:'start'}: dismiss intro/roundEnd card -> plan (or won/lost)
   onEndRound(): void; // Action{type:'endRound'}: plan -> running
   onRestart(): void;
+  onNewLayout(): void; // lost card: retry with a freshly-picked seed
   onNextLevel(): void; // won screen: advance to the following level
   onLevels(): void; // won/lost screen: back to level select
   onToggleSpeed(): void;
   onToggleScoreboard(): void;
+  onToggleLog(): void;
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -33,21 +38,42 @@ function fmt(n: number): string {
   return n >= 100 ? Math.round(n).toString() : (Math.round(n * 10) / 10).toString();
 }
 
+/** "best body 112/120" hint for a not-yet-met goal: the nearest body's progress toward the
+ * mass threshold the goal is chasing. Reads thresholds from sim/params.ts at call time. */
+function bestBodyProgress(state: GameState, goal: Goal): string | null {
+  if (goal.type === 'stars' || goal.type === 'star_kind') {
+    const cand = state.bodies.filter((b) => b.kind === 'cloud' || b.kind === 'planet');
+    if (!cand.length) return null;
+    const best = cand.reduce((a, b) => (b.mass > a.mass ? b : a));
+    return `best body ${Math.round(best.mass)}/${P.starMass}`;
+  }
+  if (goal.type === 'planets') {
+    const cand = state.bodies.filter((b) => b.kind === 'cloud');
+    if (!cand.length) return null;
+    const best = cand.reduce((a, b) => (b.mass > a.mass ? b : a));
+    return `best body ${Math.round(best.mass)}/${P.planetMass}`;
+  }
+  return null;
+}
+
 export function createHud(root: HTMLElement, cb: HudCallbacks) {
   root.innerHTML = `
-    <div class="layer">
+    <div class="layer" id="h-top-layer">
       <div class="topbar panel">
         <span class="level-name" id="h-level"></span>
         <span class="round" id="h-round"></span>
         <span class="energy" id="h-energy"></span>
         <button class="speed-toggle" id="h-speed">1x</button>
+        <button class="scoreboard-toggle" id="h-log-toggle">Log</button>
         <button class="scoreboard-toggle" id="h-score-toggle">Scoreboard</button>
       </div>
       <div class="goals panel" id="h-goals"></div>
       <div class="scoreboard-drawer panel" id="h-score-drawer" hidden></div>
+      <div class="log-drawer panel" id="h-log-drawer" hidden></div>
+      <div class="toast-stack" id="h-toasts"></div>
     </div>
     <div class="spacer"></div>
-    <div class="layer">
+    <div class="layer" id="h-bottom-layer">
       <div class="bottombar panel" id="h-bottombar">
         <div class="palette" id="h-palette"></div>
         <div class="run-row" id="h-runrow"></div>
@@ -64,18 +90,26 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     goals: root.querySelector<HTMLElement>('#h-goals')!,
     scoreToggle: root.querySelector<HTMLButtonElement>('#h-score-toggle')!,
     scoreDrawer: root.querySelector<HTMLElement>('#h-score-drawer')!,
+    logToggle: root.querySelector<HTMLButtonElement>('#h-log-toggle')!,
+    logDrawer: root.querySelector<HTMLElement>('#h-log-drawer')!,
     bottombar: root.querySelector<HTMLElement>('#h-bottombar')!,
     palette: root.querySelector<HTMLElement>('#h-palette')!,
     runrow: root.querySelector<HTMLElement>('#h-runrow')!,
     overlay: root.querySelector<HTMLElement>('#h-overlay')!,
+    toasts: root.querySelector<HTMLElement>('#h-toasts')!,
   };
+
+  const toaster = createToastManager(el.toasts);
 
   el.speed.addEventListener('click', () => cb.onToggleSpeed());
   el.scoreToggle.addEventListener('click', () => cb.onToggleScoreboard());
+  el.logToggle.addEventListener('click', () => cb.onToggleLog());
 
   let lastPaletteKey = '';
   let lastPhase = '';
   let lastRunRowPhase = '';
+  let lastLogLen = -1;
+  let lastLogRenderKey = '';
 
   function renderScoreboardRows(state: GameState): string {
     const sb = state.scoreboard;
@@ -104,14 +138,15 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     el.speed.textContent = `${ui.speed}x`;
     el.speed.classList.toggle('on', ui.speed === 2);
 
-    // goals
+    // goals (each shows the nearest body's progress toward the threshold it needs, if any)
     el.goals.innerHTML = state.goals
       .map((g) => {
         const deadline = !g.met && g.goal.byRound === state.round && state.phase !== 'plan';
         const cls = g.met ? 'met' : deadline ? 'deadline' : '';
+        const near = g.met ? null : bestBodyProgress(state, g.goal);
         return `<div class="goal ${cls}"><span class="dot"></span><span>${g.goal.label} (${fmt(
           g.current,
-        )}/${g.goal.count})</span><span class="byround">by rd ${g.goal.byRound}</span></div>`;
+        )}/${g.goal.count})${near ? ` — ${near}` : ''}</span><span class="byround">by rd ${g.goal.byRound}</span></div>`;
       })
       .join('');
 
@@ -122,7 +157,32 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     }
     const showScoreToggle = state.phase === 'plan' || state.phase === 'running' || state.phase === 'roundEnd';
     el.scoreToggle.hidden = !showScoreToggle;
-    if (!showScoreToggle) el.scoreDrawer.hidden = true;
+    el.logToggle.hidden = !showScoreToggle;
+    if (!showScoreToggle) { el.scoreDrawer.hidden = true; el.logDrawer.hidden = true; }
+
+    // event log: collapsible panel (last 8) + a toast for each new entry
+    if (lastLogLen < 0 || state.log.length < lastLogLen) {
+      // first render, or the game restarted and the log reset — resync without toasting
+      lastLogLen = state.log.length;
+    } else if (state.log.length > lastLogLen) {
+      for (let i = lastLogLen; i < state.log.length; i++) {
+        const line = state.log[i];
+        const warn = /lost|supernova|missed/i.test(line);
+        toaster.show(line, warn ? 'warn' : 'info');
+      }
+      lastLogLen = state.log.length;
+    }
+    el.logDrawer.hidden = !ui.logOpen;
+    if (ui.logOpen) {
+      const last8 = state.log.slice(-8);
+      const key = last8.join('|');
+      if (key !== lastLogRenderKey) {
+        lastLogRenderKey = key;
+        el.logDrawer.innerHTML = `<div class="loglist">${last8
+          .map((l) => `<div class="logline">${l}</div>`)
+          .join('')}</div>`;
+      }
+    }
 
     // palette + run row only meaningful during plan/running/roundEnd
     const inPlay = state.phase === 'plan' || state.phase === 'running' || state.phase === 'roundEnd';
@@ -230,21 +290,36 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     }
     if (state.phase === 'won' || state.phase === 'lost') {
       const won = state.phase === 'won';
+      // lost: only show goals that were actually due, so the card doesn't blame goals with
+      // rounds left to go (see src/levels/goals.ts judge()).
+      const due = won ? [] : state.goals.filter((g) => g.goal.byRound <= state.round);
+      const dueRows = due
+        .map(
+          (g) =>
+            `<div class="k">${g.goal.label}</div><div class="v" style="color:${
+              g.met ? 'var(--good)' : 'var(--danger)'
+            }">${g.met ? 'met' : `missed (${fmt(g.current)}/${g.goal.count})`}</div>`,
+        )
+        .join('');
       el.overlay.innerHTML = `
         <div class="overlay">
           <div class="card panel">
             <h1>${won ? 'Level complete!' : 'Level failed'}</h1>
-            <p>${won ? 'All goals met. The nursery grows on.' : 'A goal was missed. Try a different layout.'}</p>
+            <p>${won ? 'All goals met. The nursery grows on.' : 'A due goal was missed:'}</p>
+            ${due.length ? `<div class="scorelist">${dueRows}</div>` : ''}
             <div class="scorelist">${renderScoreboardRows(state)}</div>
             <div class="row">
               ${won ? '<button class="btn-primary" id="h-next">Next level</button>' : ''}
               <button class="${won ? 'btn-secondary' : 'btn-primary'}" id="h-retry">${won ? 'Replay' : 'Retry'}</button>
+              ${!won ? '<button class="btn-secondary" id="h-newlayout">New layout</button>' : ''}
               <button class="btn-secondary" id="h-exit">Levels</button>
             </div>
           </div>
         </div>`;
       if (won) {
         el.overlay.querySelector('#h-next')!.addEventListener('click', () => cb.onNextLevel());
+      } else {
+        el.overlay.querySelector('#h-newlayout')!.addEventListener('click', () => cb.onNewLayout());
       }
       el.overlay.querySelector('#h-retry')!.addEventListener('click', () => cb.onRestart());
       el.overlay.querySelector('#h-exit')!.addEventListener('click', () => cb.onLevels());
@@ -253,5 +328,5 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     el.overlay.innerHTML = '';
   }
 
-  return { update };
+  return { update, toast: toaster.show };
 }

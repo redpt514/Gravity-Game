@@ -5,10 +5,10 @@
  * unavailable (older mobile browsers, headless envs without GPU, etc).
  */
 import type { GameState } from '../sim/types';
-import { computeLetterbox } from './layout';
+import { computeLetterboxIn, type Rect } from './layout';
 
 export interface BackgroundRenderer {
-  render(state: GameState, timeSec: number): void;
+  render(state: GameState, timeSec: number, boardRect?: Rect): void;
   resize(cssW: number, cssH: number, dpr: number): void;
   destroy(): void;
 }
@@ -155,7 +155,7 @@ function createWebGL2Renderer(canvas: HTMLCanvasElement): BackgroundRenderer | n
     gl!.viewport(0, 0, canvas.width, canvas.height);
   }
 
-  function render(state: GameState, timeSec: number) {
+  function render(state: GameState, timeSec: number, boardRect?: Rect) {
     const gridW = state.gridW;
     const gridH = state.gridH;
     if (!fieldBytes || fieldBytes.length !== gridW * gridH) {
@@ -192,7 +192,7 @@ function createWebGL2Renderer(canvas: HTMLCanvasElement): BackgroundRenderer | n
       fieldBytes,
     );
 
-    const lb = computeLetterbox(cssW, cssH, state.width, state.height);
+    const lb = computeLetterboxIn(boardRect ?? { x: 0, y: 0, w: cssW, h: cssH }, state.width, state.height);
 
     gl!.useProgram(program);
     gl!.bindVertexArray(vao);
@@ -230,7 +230,7 @@ function createCanvas2DFallback(canvas: HTMLCanvasElement): BackgroundRenderer {
     canvas.height = Math.max(1, Math.round(h * ratio));
   }
 
-  function render(_state: GameState, timeSec: number) {
+  function render(_state: GameState, timeSec: number, _boardRect?: Rect) {
     const w = canvas.width;
     const h = canvas.height;
     const pulse = 0.9 + 0.1 * Math.sin(timeSec * 0.6);

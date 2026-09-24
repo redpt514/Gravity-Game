@@ -3,13 +3,37 @@ import type { Game, GameFactory, LevelDef, ToolId } from './sim/types';
 import { createMockGame } from './render/mockGame';
 import { createBackgroundRenderer } from './render/gl';
 import { createSceneRenderer, type Preview } from './render/scene';
+import type { Rect } from './render/layout';
 import { createHud, type HudUiState } from './ui/hud';
 import { attachInput } from './ui/input';
 
 /** Wall-clock seconds a round should take to play out at 1x speed. */
 const ROUND_DURATION_SEC = 15;
 const STORAGE_KEY = 'gravity-game:unlocked';
+const INVENTORY_KEY = 'gravity-game:inventory';
 const LEVEL_COUNT = 5;
+
+type Inventory = Partial<Record<ToolId, number>>;
+/** createGame's real signature (src/sim/game.ts) has a 3rd `{inventory}` options arg that the
+ * shared GameFactory type (src/sim/types.ts, owned by sim/) doesn't declare. */
+type GameFactoryWithOpts = (levelId: number, seed?: number, opts?: { inventory?: Inventory }) => Game;
+
+function loadInventory(): Inventory {
+  try {
+    const raw = localStorage.getItem(INVENTORY_KEY);
+    return raw ? (JSON.parse(raw) as Inventory) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveInventory(inv: Inventory) {
+  try {
+    localStorage.setItem(INVENTORY_KEY, JSON.stringify(inv));
+  } catch {
+    /* localStorage unavailable; inventory just won't carry over */
+  }
+}
 
 interface LevelSummary {
   id: number;
@@ -75,7 +99,7 @@ function renderLevelSelect(
 
 interface Session {
   game: Game;
-  tick(dtSec: number, timeSec: number): void;
+  tick(dtSec: number, timeSec: number, boardRect: Rect): void;
   dispose(): void;
 }
 
@@ -84,16 +108,19 @@ function createSession(
   sceneCanvas: HTMLCanvasElement,
   uiRoot: HTMLElement,
   scene: ReturnType<typeof createSceneRenderer>,
-  opts: { onWin: () => void; onNextLevel: () => void; onLevels: () => void },
+  opts: { onWin: () => void; onNextLevel: () => void; onLevels: () => void; onNewLayout: () => void },
 ): Session {
-  const uiState: HudUiState = { selectedTool: null, speed: 1, scoreboardOpen: false };
+  const uiState: HudUiState = { selectedTool: null, speed: 1, scoreboardOpen: false, logOpen: false };
   let preview: Preview = null;
   let tickAccum = 0;
   let wonHandled = false;
+  let boardRect: Rect = { x: 0, y: 0, w: sceneCanvas.clientWidth || 1, h: sceneCanvas.clientHeight || 1 };
 
   const hud = createHud(uiRoot, {
     onSelectTool(tool: ToolId) {
-      uiState.selectedTool = uiState.selectedTool === tool ? null : tool;
+      // re-tapping the already-selected card must NOT deselect it (bug: natural
+      // "pick tool, place, pick tool again" rhythm used to silently no-op the next tap)
+      uiState.selectedTool = tool;
     },
     onStart() {
       game.apply({ type: 'start' });
@@ -107,6 +134,9 @@ function createSession(
       uiState.selectedTool = null;
       tickAccum = 0;
     },
+    onNewLayout() {
+      opts.onNewLayout();
+    },
     onNextLevel() {
       opts.onNextLevel();
     },
@@ -119,19 +149,30 @@ function createSession(
     onToggleScoreboard() {
       uiState.scoreboardOpen = !uiState.scoreboardOpen;
     },
+    onToggleLog() {
+      uiState.logOpen = !uiState.logOpen;
+    },
   });
 
   const input = attachInput(sceneCanvas, game, uiRoot, {
     getSelectedTool: () => uiState.selectedTool,
+    getBoardRect: () => boardRect,
     onPlaced() {
       /* keep the tool selected so the player can place several in a row */
     },
     onPreview(p) {
       preview = p;
     },
+    onHint(msg) {
+      hud.toast(msg, 'info');
+    },
+    onRejected(reason) {
+      hud.toast(reason, 'warn');
+    },
   });
 
-  function tick(dtSec: number, timeSec: number) {
+  function tick(dtSec: number, timeSec: number, rect: Rect) {
+    boardRect = rect;
     const before = game.state();
     if (before.phase === 'running') {
       const ticksPerSecond = before.level.ticksPerRound / ROUND_DURATION_SEC;
@@ -147,7 +188,7 @@ function createSession(
       wonHandled = true;
       opts.onWin();
     }
-    scene.render(state, timeSec, preview);
+    scene.render(state, timeSec, preview, boardRect);
     hud.update(state, uiState);
   }
 
@@ -209,21 +250,45 @@ async function boot() {
     renderLevelSelect(uiRoot, levelSummaries, getUnlocked(), (id) => startLevel(id));
   }
 
-  function startLevel(id: number) {
+  /** The screen area not covered by the HUD's top bar / bottom palette (measured live off the
+   * actual DOM each frame), so the board is letterboxed away from HUD chrome at any viewport. */
+  function computeBoardRect(): Rect {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const topEl = uiRoot.querySelector<HTMLElement>('#h-top-layer');
+    const botEl = uiRoot.querySelector<HTMLElement>('#h-bottom-layer');
+    const topY = topEl ? topEl.getBoundingClientRect().bottom : 0;
+    const botY = botEl ? botEl.getBoundingClientRect().top : h;
+    const y = Math.max(0, topY);
+    const bottom = Math.min(h, Math.max(y, botY));
+    return { x: 0, y, w, h: Math.max(40, bottom - y) };
+  }
+
+  function startLevel(id: number, seedOverride?: number) {
     if (session) session.dispose();
     sceneCanvas.style.display = 'block';
     uiRoot.innerHTML = '';
-    const game = factory(id, (Date.now() ^ (id * 7919)) >>> 0);
+    // deterministic by default: first attempt and Retry both replay level.seed; only "New
+    // layout" (or an explicit override) picks a different one.
+    const def = realLevels?.find((l) => l.id === id);
+    const seed = seedOverride ?? def?.seed ?? ((Date.now() ^ (id * 7919)) >>> 0);
+    const inventory = loadInventory();
+    const game = (factory as GameFactoryWithOpts)(id, seed, { inventory });
     session = createSession(game, sceneCanvas, uiRoot, scene, {
       onWin: () => {
         const unlocked = getUnlocked();
         if (id >= unlocked && id < LEVEL_COUNT) setUnlocked(id + 1);
+        saveInventory(game.state().inventory);
       },
       onNextLevel: () => {
         if (id < LEVEL_COUNT) startLevel(id + 1);
         else showLevelSelect();
       },
       onLevels: () => showLevelSelect(),
+      onNewLayout: () => {
+        const fresh = (Date.now() ^ (id * 7919) ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0;
+        startLevel(id, fresh);
+      },
     });
   }
 
@@ -235,8 +300,9 @@ async function boot() {
     last = now;
     const timeSec = now / 1000;
     const bgGame = session ? session.game : backdropGame;
-    bg.render(bgGame.state(), timeSec);
-    if (session) session.tick(dtSec, timeSec);
+    const boardRect = session ? computeBoardRect() : { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight };
+    bg.render(bgGame.state(), timeSec, boardRect);
+    if (session) session.tick(dtSec, timeSec, boardRect);
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);

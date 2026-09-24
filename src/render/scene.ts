@@ -1,7 +1,8 @@
 /** Canvas2D layer drawn above the WebGL nebula: particles, bodies, nodes, VFX. */
 import type { Body, BodyKind, GameState, Node as SimNode, ToolId } from '../sim/types';
-import { computeLetterbox, worldToScreen, type Letterbox } from './layout';
+import { computeLetterboxIn, worldToScreen, type Letterbox, type Rect } from './layout';
 import { ELEMENT_COLOR, TOOL_COLOR, TOOL_DEFS } from './toolDefs';
+import { P } from '../sim/params';
 
 /** Live placement preview drawn by input.ts while the player is dragging a tool into place. */
 export type Preview =
@@ -10,7 +11,8 @@ export type Preview =
   | null;
 
 export interface SceneRenderer {
-  render(state: GameState, timeSec: number, preview?: Preview): void;
+  /** `boardRect`: the screen area (px) not covered by HUD chrome; the world is letterboxed into it. */
+  render(state: GameState, timeSec: number, preview: Preview | undefined, boardRect: Rect): void;
   resize(cssW: number, cssH: number, dpr: number): void;
   lastLetterbox(): Letterbox;
 }
@@ -98,6 +100,121 @@ function drawBody(ctx: CanvasRenderingContext2D, b: Body, x: number, y: number, 
       break;
     }
   }
+}
+
+/** Next lifecycle mass threshold (for the "62/120" style label), or null when the body's
+ * progress ring tracks something other than a simple mass target (fusion depletion etc). */
+function nextThreshold(kind: BodyKind): number | null {
+  switch (kind) {
+    case 'cloud': return P.planetMass;
+    case 'planet': return P.starMass;
+    case 'white_dwarf': return P.wdNovaMass;
+    default: return null;
+  }
+}
+
+/** Mass label + a progress ring toward the body's next lifecycle threshold (body.progress,
+ * computed by the sim in src/sim/bodies.ts: mass fraction for cloud/planet/white_dwarf,
+ * fuel depletion fraction for star_ms/star_giant). */
+function drawBodyBadge(ctx: CanvasRenderingContext2D, b: Body, x: number, y: number, r: number) {
+  const ringR = Math.max(6, r + 5);
+  if (b.progress > 0) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,236,170,0.95)';
+    ctx.beginPath();
+    ctx.arc(x, y, ringR, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, b.progress));
+    ctx.stroke();
+    ctx.restore();
+  }
+  const th = nextThreshold(b.kind);
+  const label = th != null ? `${Math.round(b.mass)}/${th}` : `${Math.round(b.mass)}`;
+  ctx.save();
+  ctx.font = '10px -apple-system,BlinkMacSystemFont,sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const ty = y + ringR + 3;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+  ctx.strokeText(label, x, ty);
+  ctx.fillStyle = 'rgba(238,241,251,0.92)';
+  ctx.fillText(label, x, ty);
+  ctx.restore();
+}
+
+/** Sparse curved arrows showing the counter-clockwise gas current (see level.swirl,
+ * src/sim/particles.ts currentAt — reimplemented here from live params since that function
+ * needs the sim's internal World, not just GameState). */
+function currentVec(state: GameState, x: number, y: number): { x: number; y: number } {
+  const a = state.width / 2, b = state.height / 2;
+  const dx = x - a, dy = y - b;
+  const u = (dx * dx) / (a * a) + (dy * dy) / (b * b);
+  const sw = P.swirl * (state.level.swirl ?? 1);
+  const u0 = P.swirlFadeStart, u1 = P.swirlFadeEnd;
+  const su = u <= u0 ? sw : u >= u1 ? 0 : (sw * (u1 - u)) / (u1 - u0);
+  return { x: (su * dy) / b, y: (-su * dx * b) / (a * a) };
+}
+
+function drawCurrentArrows(ctx: CanvasRenderingContext2D, state: GameState, lb: Letterbox) {
+  const cols = 9, rows = 6;
+  ctx.save();
+  ctx.lineWidth = 1.3;
+  ctx.lineCap = 'round';
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < cols; i++) {
+      const wx = ((i + 0.5) / cols) * state.width;
+      const wy = ((j + 0.5) / rows) * state.height;
+      const v = currentVec(state, wx, wy);
+      const mag = Math.hypot(v.x, v.y);
+      if (mag < 1e-5) continue;
+      const norm = Math.min(1, mag / (P.swirl * 0.85));
+      const ang = Math.atan2(v.y, v.x);
+      const len = 3 + norm * 5;
+      const p0 = worldToScreen(wx, wy, lb);
+      const p1 = worldToScreen(wx + Math.cos(ang) * len, wy + Math.sin(ang) * len, lb);
+      const perp = ang + Math.PI / 2;
+      const midx = (p0.x + p1.x) / 2 + Math.cos(perp) * 4;
+      const midy = (p0.y + p1.y) / 2 + Math.sin(perp) * 4;
+      ctx.strokeStyle = `rgba(150,200,255,${0.14 + 0.16 * norm})`;
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.quadraticCurveTo(midx, midy, p1.x, p1.y);
+      ctx.stroke();
+      const ha = ang + 2.6, hb = ang - 2.6;
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p1.x + Math.cos(ha) * 3, p1.y + Math.sin(ha) * 3);
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p1.x + Math.cos(hb) * 3, p1.y + Math.sin(hb) * 3);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+/** Faint shading of cells at/above the cloud-condensation density threshold ("marching squares
+ * light": shade the cells, no isoline extraction). Uses state.density/state.cloudThreshold,
+ * which the sim publishes on GameState (src/sim/game.ts), when present. */
+function drawDensityContour(ctx: CanvasRenderingContext2D, state: GameState, lb: Letterbox) {
+  if (!state.density || !state.cloudThreshold) return;
+  const gw = state.gridW, gh = state.gridH;
+  const cw = state.width / gw, ch = state.height / gh;
+  const th = state.cloudThreshold;
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,207,92,0.10)';
+  for (let j = 0; j < gh; j++) {
+    for (let i = 0; i < gw; i++) {
+      if (state.density[j * gw + i] < th) continue;
+      const p0 = worldToScreen(i * cw, j * ch, lb);
+      const p1 = worldToScreen((i + 1) * cw, (j + 1) * ch, lb);
+      ctx.fillRect(p0.x, p0.y, p1.x - p0.x, p1.y - p0.y);
+    }
+  }
+  ctx.restore();
 }
 
 function roundRect(
@@ -244,10 +361,10 @@ export function createSceneRenderer(canvas: HTMLCanvasElement): SceneRenderer {
     canvas.height = Math.max(1, Math.round(h * ratio));
   }
 
-  function render(state: GameState, timeSec: number, preview?: Preview) {
+  function render(state: GameState, timeSec: number, preview: Preview | undefined, boardRect: Rect) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
-    lb = computeLetterbox(cssW, cssH, state.width, state.height);
+    lb = computeLetterboxIn(boardRect, state.width, state.height);
 
     ctx.save();
     ctx.beginPath();
@@ -258,6 +375,10 @@ export function createSceneRenderer(canvas: HTMLCanvasElement): SceneRenderer {
     ctx.strokeStyle = 'rgba(255,255,255,0.12)';
     ctx.lineWidth = 1;
     ctx.strokeRect(lb.x + 0.5, lb.y + 0.5, lb.w - 1, lb.h - 1);
+
+    // gas current + cloud-threshold shading (drawn under particles/bodies)
+    drawCurrentArrows(ctx, state, lb);
+    drawDensityContour(ctx, state, lb);
 
     // particles
     for (const p of state.particles) {
@@ -276,6 +397,7 @@ export function createSceneRenderer(canvas: HTMLCanvasElement): SceneRenderer {
       const sx = lb.x + b.x * lb.scale;
       const sy = lb.y + b.y * lb.scale;
       drawBody(ctx, b, sx, sy, b.radius * lb.scale);
+      drawBodyBadge(ctx, b, sx, sy, b.radius * lb.scale);
     }
 
     // nodes

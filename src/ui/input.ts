@@ -1,6 +1,6 @@
 /** Pointer input: place tools, drag walls, tap nodes to remove (with confirm popover). */
 import type { Game, GameState, Node as SimNode, ToolId } from '../sim/types';
-import { computeLetterbox, screenToWorld, worldToScreen, type Letterbox } from '../render/layout';
+import { computeLetterboxIn, screenToWorld, worldToScreen, type Letterbox, type Rect } from '../render/layout';
 import type { Preview } from '../render/scene';
 import { TOOL_DEFS } from '../render/toolDefs';
 
@@ -10,9 +10,15 @@ export interface InputHandle {
 
 export interface InputCallbacks {
   getSelectedTool(): ToolId | null;
+  /** the current screen-space area (px) the board is letterboxed into (not covered by HUD) */
+  getBoardRect(): Rect;
   /** called after a placement attempt is sent to the sim (success or not) */
   onPlaced(): void;
   onPreview(p: Preview): void;
+  /** a tap on the empty board with no tool selected */
+  onHint(msg: string): void;
+  /** a placement attempt was rejected by the sim (ActionResult.reason) */
+  onRejected(reason: string): void;
 }
 
 const TOUCH_RADIUS_PX = 24;
@@ -98,7 +104,7 @@ export function attachInput(
   function toWorld(clientX: number, clientY: number) {
     const rect = canvas.getBoundingClientRect();
     const state = game.state();
-    const lb = computeLetterbox(rect.width, rect.height, state.width, state.height);
+    const lb = computeLetterboxIn(cb.getBoardRect(), state.width, state.height);
     const sx = clientX - rect.left;
     const sy = clientY - rect.top;
     return { world: screenToWorld(sx, sy, lb), lb, state, sx, sy };
@@ -117,6 +123,7 @@ export function attachInput(
     }
     const hit = hitTestNode(state, lb, sx, sy);
     if (hit) showRemovePopover(hit, sx, sy);
+    else cb.onHint('Select a tool below');
   }
 
   function onPointerMove(e: PointerEvent) {
@@ -153,11 +160,13 @@ export function attachInput(
     if (place && tool && state.phase === 'plan' && dragStart) {
       if (tool === 'wall') {
         if (Math.hypot(world.x - dragStart.x, world.y - dragStart.y) > 2) {
-          game.apply({ type: 'place', tool: 'wall', x: dragStart.x, y: dragStart.y, x2: world.x, y2: world.y });
+          const r = game.apply({ type: 'place', tool: 'wall', x: dragStart.x, y: dragStart.y, x2: world.x, y2: world.y });
+          if (!r.ok) cb.onRejected(r.reason ?? 'Cannot place there');
           cb.onPlaced();
         }
       } else {
-        game.apply({ type: 'place', tool, x: world.x, y: world.y });
+        const r = game.apply({ type: 'place', tool, x: world.x, y: world.y });
+        if (!r.ok) cb.onRejected(r.reason ?? 'Cannot place there');
         cb.onPlaced();
       }
     }
