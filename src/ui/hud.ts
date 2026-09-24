@@ -1,6 +1,6 @@
 /** HUD: top bar, goals, tool palette, run/progress control, intro/round-end/won/lost cards. */
 import type { Goal, GameState, ToolId } from '../sim/types';
-import { TOOL_DEFS } from '../render/toolDefs';
+import { TOOL_DEFS, TOOL_COLOR } from '../render/toolDefs';
 import { P } from '../sim/params';
 import { createToastManager } from './toast';
 
@@ -63,17 +63,25 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
         <span class="level-name" id="h-level"></span>
         <span class="round" id="h-round"></span>
         <span class="energy" id="h-energy"></span>
-        <button class="speed-toggle" id="h-speed">1x</button>
-        <button class="scoreboard-toggle" id="h-log-toggle">Log</button>
-        <button class="scoreboard-toggle" id="h-score-toggle">Scoreboard</button>
+        <span class="spacer-x"></span>
+        <button class="goals-chip" id="h-goals-chip"></button>
+        <button class="icon-btn" id="h-menu-toggle" aria-label="Menu">&#8942;</button>
       </div>
-      <div class="goals panel" id="h-goals"></div>
-      <div class="scoreboard-drawer panel" id="h-score-drawer" hidden></div>
-      <div class="log-drawer panel" id="h-log-drawer" hidden></div>
+      <div class="dropdown goals-drawer panel" id="h-goals-drawer" hidden></div>
+      <div class="dropdown panel" id="h-menu-drawer" hidden>
+        <div class="menu-actions">
+          <button id="h-speed">1x speed</button>
+          <button id="h-log-toggle">Log</button>
+          <button id="h-score-toggle">Scoreboard</button>
+        </div>
+        <div class="scoreboard-drawer" id="h-score-drawer" hidden></div>
+        <div class="log-drawer" id="h-log-drawer-inner" hidden></div>
+      </div>
       <div class="toast-stack" id="h-toasts"></div>
     </div>
     <div class="spacer"></div>
     <div class="layer" id="h-bottom-layer">
+      <div class="tool-strip panel" id="h-tool-strip" hidden></div>
       <div class="bottombar panel" id="h-bottombar">
         <div class="palette" id="h-palette"></div>
         <div class="run-row" id="h-runrow"></div>
@@ -86,12 +94,16 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     level: root.querySelector<HTMLElement>('#h-level')!,
     round: root.querySelector<HTMLElement>('#h-round')!,
     energy: root.querySelector<HTMLElement>('#h-energy')!,
+    goalsChip: root.querySelector<HTMLButtonElement>('#h-goals-chip')!,
+    goalsDrawer: root.querySelector<HTMLElement>('#h-goals-drawer')!,
+    menuToggle: root.querySelector<HTMLButtonElement>('#h-menu-toggle')!,
+    menuDrawer: root.querySelector<HTMLElement>('#h-menu-drawer')!,
     speed: root.querySelector<HTMLButtonElement>('#h-speed')!,
-    goals: root.querySelector<HTMLElement>('#h-goals')!,
     scoreToggle: root.querySelector<HTMLButtonElement>('#h-score-toggle')!,
     scoreDrawer: root.querySelector<HTMLElement>('#h-score-drawer')!,
     logToggle: root.querySelector<HTMLButtonElement>('#h-log-toggle')!,
-    logDrawer: root.querySelector<HTMLElement>('#h-log-drawer')!,
+    logDrawer: root.querySelector<HTMLElement>('#h-log-drawer-inner')!,
+    toolStrip: root.querySelector<HTMLElement>('#h-tool-strip')!,
     bottombar: root.querySelector<HTMLElement>('#h-bottombar')!,
     palette: root.querySelector<HTMLElement>('#h-palette')!,
     runrow: root.querySelector<HTMLElement>('#h-runrow')!,
@@ -100,6 +112,32 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
   };
 
   const toaster = createToastManager(el.toasts);
+
+  let goalsOpen = false;
+  let menuOpen = false;
+  function closeDropdowns() {
+    goalsOpen = false;
+    menuOpen = false;
+    el.goalsDrawer.hidden = true;
+    el.menuDrawer.hidden = true;
+  }
+  el.goalsChip.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    goalsOpen = !goalsOpen;
+    menuOpen = false;
+    el.goalsDrawer.hidden = !goalsOpen;
+    el.menuDrawer.hidden = true;
+  });
+  el.menuToggle.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    menuOpen = !menuOpen;
+    goalsOpen = false;
+    el.menuDrawer.hidden = !menuOpen;
+    el.goalsDrawer.hidden = true;
+  });
+  root.addEventListener('click', () => closeDropdowns());
+  el.goalsDrawer.addEventListener('click', (ev) => ev.stopPropagation());
+  el.menuDrawer.addEventListener('click', (ev) => ev.stopPropagation());
 
   el.speed.addEventListener('click', () => cb.onToggleSpeed());
   el.scoreToggle.addEventListener('click', () => cb.onToggleScoreboard());
@@ -110,6 +148,7 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
   let lastRunRowPhase = '';
   let lastLogLen = -1;
   let lastLogRenderKey = '';
+  let lastSelectedTool: ToolId | null = null;
 
   function renderScoreboardRows(state: GameState): string {
     const sb = state.scoreboard;
@@ -131,15 +170,24 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
 
   function update(state: GameState, ui: HudUiState) {
     el.level.textContent = state.level.name;
-    el.round.textContent = `Round ${state.round}/${state.level.rounds}`;
-    el.energy.innerHTML = `⚡ ${Math.floor(state.energy)}${
-      state.phase === 'plan' ? `<span class="income">+${state.level.incomePerRound}/rd</span>` : ''
+    el.round.textContent = `R${state.round}/${state.level.rounds}`;
+    el.energy.innerHTML = `⚡${Math.floor(state.energy)}${
+      state.phase === 'plan' ? `<span class="income">+${state.level.incomePerRound}</span>` : ''
     }`;
-    el.speed.textContent = `${ui.speed}x`;
+    el.speed.textContent = `${ui.speed}x speed`;
     el.speed.classList.toggle('on', ui.speed === 2);
 
-    // goals (each shows the nearest body's progress toward the threshold it needs, if any)
-    el.goals.innerHTML = state.goals
+    // goals summary chip (collapsed) + full list in its dropdown
+    const metCount = state.goals.filter((g) => g.met).length;
+    const anyDeadline = state.goals.some(
+      (g) => !g.met && g.goal.byRound === state.round && state.phase !== 'plan',
+    );
+    el.goalsChip.className = `goals-chip${
+      metCount === state.goals.length && state.goals.length > 0 ? ' all-met' : anyDeadline ? ' deadline' : ''
+    }`;
+    el.goalsChip.innerHTML = `<span class="dot"></span><span>Goals ${metCount}/${state.goals.length}</span>`;
+    // each goal shows the nearest body's progress toward the threshold it needs, if any
+    el.goalsDrawer.innerHTML = state.goals
       .map((g) => {
         const deadline = !g.met && g.goal.byRound === state.round && state.phase !== 'plan';
         const cls = g.met ? 'met' : deadline ? 'deadline' : '';
@@ -150,7 +198,7 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
       })
       .join('');
 
-    // scoreboard drawer
+    // scoreboard drawer (inside the overflow menu)
     el.scoreDrawer.hidden = !ui.scoreboardOpen;
     if (ui.scoreboardOpen) {
       el.scoreDrawer.innerHTML = `<div class="scorelist">${renderScoreboardRows(state)}</div>`;
@@ -158,6 +206,7 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     const showScoreToggle = state.phase === 'plan' || state.phase === 'running' || state.phase === 'roundEnd';
     el.scoreToggle.hidden = !showScoreToggle;
     el.logToggle.hidden = !showScoreToggle;
+    el.goalsChip.hidden = !showScoreToggle || state.goals.length === 0;
     if (!showScoreToggle) { el.scoreDrawer.hidden = true; el.logDrawer.hidden = true; }
 
     // event log: collapsible panel (last 8) + a toast for each new entry
@@ -187,6 +236,7 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     // palette + run row only meaningful during plan/running/roundEnd
     const inPlay = state.phase === 'plan' || state.phase === 'running' || state.phase === 'roundEnd';
     el.bottombar.style.display = inPlay ? 'flex' : 'none';
+    if (!inPlay) el.toolStrip.hidden = true;
 
     if (inPlay) {
       const paletteKey = `${state.phase}|${state.energy}|${ui.selectedTool}|${state.level.tools.join(',')}|${JSON.stringify(
@@ -206,23 +256,33 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
             const affordable = inv > 0 || state.energy >= def.cost;
             const selected = ui.selectedTool === tool;
             const disabled = state.phase !== 'plan' || !affordable;
-            return `<button class="tool-card${selected ? ' selected' : ''}" data-tool="${tool}" ${
-              disabled ? 'disabled' : ''
-            }>
-              <span class="name">${def.name}</span>
-              <span class="desc">${def.description}</span>
-              <span class="meta"><span class="cost">${inv > 0 ? 'free' : `⚡${def.cost}`}</span>${
-                inv > 0 ? `<span class="count">×${inv}</span>` : ''
-              }</span>
+            return `<button class="tool-chip${selected ? ' selected' : ''}" data-tool="${tool}" title="${
+              def.description
+            }" ${disabled ? 'disabled' : ''}>
+              <span class="dot" style="background:${TOOL_COLOR[tool]}"></span>
+              <span class="chip-name">${def.name}</span>
+              <span class="chip-cost">${inv > 0 ? `free ×${inv}` : `⚡${def.cost}`}</span>
             </button>`;
           })
           .join('');
-        el.palette.querySelectorAll<HTMLButtonElement>('.tool-card').forEach((btn) => {
+        el.palette.querySelectorAll<HTMLButtonElement>('.tool-chip').forEach((btn) => {
           btn.addEventListener('click', () => {
             const tool = btn.dataset.tool as ToolId;
             cb.onSelectTool(tool);
           });
         });
+      }
+
+      // selected tool's one-line description, shown in a strip above the palette
+      if (ui.selectedTool !== lastSelectedTool) {
+        lastSelectedTool = ui.selectedTool;
+        if (ui.selectedTool) {
+          const def = TOOL_DEFS[ui.selectedTool];
+          el.toolStrip.innerHTML = `<b>${def.name}:</b> ${def.description}`;
+          el.toolStrip.hidden = false;
+        } else {
+          el.toolStrip.hidden = true;
+        }
       }
 
       const pct = Math.min(100, Math.round((state.tick / state.level.ticksPerRound) * 100));
@@ -270,7 +330,7 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     if (state.phase === 'roundEnd') {
       const met = state.goals.filter((g) => g.goal.byRound <= state.round);
       el.overlay.innerHTML = `
-        <div class="overlay" id="h-roundend-overlay" style="align-items:flex-end;background:transparent;padding-bottom:190px;pointer-events:none;">
+        <div class="overlay" id="h-roundend-overlay" style="align-items:flex-end;background:transparent;padding-bottom:88px;pointer-events:none;">
           <div class="card panel" style="width:min(360px,92vw);margin:0 auto;">
             <h2>Round ${state.round} complete</h2>
             <div class="scorelist">
