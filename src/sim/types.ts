@@ -185,3 +185,27 @@ export const WORLD_H = 90;
 export const GRID_W = 64;
 export const GRID_H = 36;
 export const TICKS_PER_SECOND = 30;
+
+// ---- v0.2 contract additions: adaptive world size, procedural levels, force sampling ----
+
+/** Options for createGame(levelId, seed?, opts?). */
+export interface GameOptions {
+  /** reward tools carried over from earlier levels */
+  inventory?: Partial<Record<ToolId, number>>;
+  /** board size in world units + grid; default DEFAULT_WORLD (160x90, 64x36). See src/sim/worldSize.ts */
+  world?: { width: number; height: number; gridW: number; gridH: number };
+  /** play this level definition instead of looking up levelId (used for procedural levels) */
+  level?: LevelDef;
+}
+
+/**
+ * Sim-owned (src/sim/force.ts): `forceAt(state, x, y): Vec2` returns the acceleration a free
+ * particle at (x,y) feels right now (field gradient incl. bodies + nodes + ambient, plus gas current),
+ * in world units per tick^2. UI draws gravity arrows from it.
+ *
+ * Levels (src/levels/catalog.ts): `HANDCRAFTED_COUNT = 3`; `getLevelDef(n, world)` returns the
+ * handcrafted level for n <= 3 and a procedurally generated, calibrated (always winnable) level for n >= 4.
+ * `generateLevel(n, world)` in src/levels/procgen.ts is deterministic in (n, world) and may take a few seconds.
+ * Worker (src/levels/procgen.worker.ts): postMessage({ n, world }) -> replies { n, key, level: LevelDef }
+ * where key = levelCacheKey(n, world) from catalog.ts.
+ */
