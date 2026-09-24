@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc -p .",
-    "play": "node --experimental-strip-types scripts/play.ts"
+    "play": "node --experimental-strip-types scripts/play.ts",
+    "eval": "node --experimental-strip-types scripts/eval.ts"
   },
   "repository": {
     "type": "git",

@@ -36,6 +36,12 @@ export const P = {
   cloudCheckEvery: 3,
   minBodySpacing: 7,
   maxNewCloudsPerCheck: 3,
+  cloudMaxBirthMass: 30,  // a new cloud captures at most this many (nearest) particles; the rest must be accreted
+  // ---- lens: acts on bodies, only weakly on free gas ----
+  lensGasFrac: 0.15,      // fraction of the lens potential felt by free gas
+  lensNoCloudR: 1.0,      // x lens radius: no cloud condenses inside (lens only works on existing bodies)
+  lensFeedMul: 1.8,       // accretion rate multiplier for bodies inside a lens radius
+  lensAccreteAdd: 1.5,    // extra accretion radius for bodies inside a lens radius
   // ---- bodies ----
   planetMass: 40,
   starMass: 120,
@@ -44,6 +50,7 @@ export const P = {
   novaMass: 250,          // giant >= this at end -> supernova, else white dwarf
   wdNovaMass: 320,        // white dwarf accreting to this mass explodes (type Ia)
   collapseMass: 600,      // any body >= this -> black hole
+  neutronMaxMass: 200,    // neutron stars do not accrete gas; merged past this they collapse to a black hole
   fusionK: 2.2e-6,        // H->He per tick = fusionK * m^2
   giantFusionMul: 2.5,    // He->C/O rate multiplier
   novaEjectFrac: 0.6,
@@ -53,6 +60,8 @@ export const P = {
   bodyMobility: 0.35,     // bodies respond to field gradient this much
   bodyDrift: 0.5,         // bodies are carried by the gas current this much (black holes: 0)
   bodyDamping: 0.9,
+  bodyMinCurrent: 0.5,    // bodies feel at least this fraction of the current, even in the corners (no stranding)
+  bodyEdgeMargin: 3,      // soft edge push for bodies, beyond their radius
   bodyMaxSpeed: 0.8,
   mergeFactor: 0.9,       // merge when dist < (ra+rb)*mergeFactor
   accreteMul: 1.2,        // accretion radius = radius * accreteMul + accreteAdd
@@ -60,8 +69,8 @@ export const P = {
   accreteBase: 0.02,      // max particles captured per tick = base + massMul * mass
   accreteMassMul: 0.00015,
   accreteMaxBudget: 3,
-  accreteFeedMin: 0.25,   // rate multiplier = local density / cloud threshold, clamped
-  accreteFeedMax: 2,
+  accreteFeedMin: 0.1,    // rate multiplier = local FREE-gas density / cloud threshold, clamped
+  accreteFeedMax: 6,
   /** body radius = a + b*sqrt(mass), per kind */
   bodyRadius: {
     cloud: [1.5, 0.4], planet: [1.0, 0.2], star_ms: [1.5, 0.25], star_giant: [2.5, 0.4],
@@ -69,6 +78,8 @@ export const P = {
   } as Record<string, [number, number]>,
   // ---- nodes ----
   wallMaxLen: 50,
+  wallMinLen: 5,
+  nodeMinSpacing: 4,      // same-tool nodes (wall midpoints) must be at least this far apart
   blackHoleConsumeFrac: 0.3,
   blackHoleStartMass: 100,
   // ---- scoring / bookkeeping ----
@@ -76,6 +87,7 @@ export const P = {
   scoreStar: 50,
   scoreNova: 200,
   scorePerElement: 1,
+  scorePerEnergy: 1,      // leftover dark energy at level win
   logLines: 10,
   goalEvalEvery: 10,
 };

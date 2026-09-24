@@ -128,7 +128,8 @@ export function initAmbient(w: World): void {
 
 /**
  * Rebuild density, gravity and the public `field` grid, plus gradients.
- * field = ambient + G*blur(max(0, rho - threshold) + bodies) + node kernels.
+ * field = ambient + G*blur(max(0, rho - threshold) + bodies) + node kernels (bodies feel this).
+ * Gas feels pot = field - (1-lensGasFrac)*lens kernels - pressure.
  */
 export function computeField(w: World): void {
   const s = w.s;
@@ -142,6 +143,8 @@ export function computeField(w: World): void {
     const p = ps[k];
     if (p.bodyId === 0) splat(rho, gw, gh, cell, p.x, p.y, 1);
   }
+  // free-gas-only smoothed density (bodies excluded): cloud formation, accretion feed, public `density`
+  boxBlur(rho, w.rhoF, tmp, gw, gh, 1, P.densityBlurPasses);
   // bodies occupy their area at the background density so they are not pressure sinks
   for (const b of s.bodies) {
     const area = (Math.PI * b.radius * b.radius) / (cell * cell);
@@ -151,10 +154,10 @@ export function computeField(w: World): void {
   let maxD = 0;
   const gth = P.gravThreshold * w.meanDensity;
   const gcap = Math.max(0, (P.cloudDensity - P.gravThreshold) * w.meanDensity);
+  const rhoF = w.rhoF;
   for (let i = 0; i < n; i++) {
-    const d = rhoS[i];
-    if (d > maxD) maxD = d;
-    const e = d - gth;
+    if (rhoF[i] > maxD) maxD = rhoF[i];
+    const e = rhoS[i] - gth;
     src[i] = e > 0 ? (e < gcap ? e : gcap) : 0;
   }
   w.maxDensity = maxD;
@@ -169,7 +172,9 @@ export function computeField(w: World): void {
   const G = P.gravG, base = w.ambientBase, sa = w.rippleSin, ca = w.rippleCos;
   for (let k = 0; k < n; k++) field[k] = amb * base[k] + rc * sa[k] - rs * ca[k] + G * grav[k];
 
-  // node kernels, stamped over their bounding boxes
+  // node kernels, stamped over their bounding boxes (lens also into lensPot: gas feels it only weakly)
+  const lensPot = w.lensPot;
+  lensPot.fill(0);
   for (const nd of s.nodes) {
     const str = nodeStrength(w, nd);
     if (str === 0) continue;
@@ -179,14 +184,17 @@ export function computeField(w: World): void {
     const i0 = Math.max(0, Math.floor(x0 / cell)), i1 = Math.min(gw - 1, Math.floor(x1 / cell));
     const j0 = Math.max(0, Math.floor(y0 / cell)), j1 = Math.min(gh - 1, Math.floor(y1 / cell));
     for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
-      field[j * gw + i] += nodeKernel(nd, str, (i + 0.5) * cell, (j + 0.5) * cell);
+      const v = nodeKernel(nd, str, (i + 0.5) * cell, (j + 0.5) * cell);
+      field[j * gw + i] += v;
+      if (nd.tool === 'lens') lensPot[j * gw + i] += v;
     }
   }
 
   const ref = P.pressureRef > 0 ? P.pressureRef : w.meanDensity, kh = P.pressureK, kl = P.pressureKLow;
+  const lensOff = 1 - P.lensGasFrac;
   for (let i = 0; i < n; i++) {
     const e = rhoS[i] - ref;
-    pot[i] = field[i] - (e > 0 ? kh * e : kl * e);
+    pot[i] = field[i] - lensOff * lensPot[i] - (e > 0 ? kh * e : kl * e);
   }
   gradient(pot, gx, gy, gw, gh, cell);
   gradient(field, fgx, fgy, gw, gh, cell);

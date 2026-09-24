@@ -6,6 +6,7 @@
  * plan phase until the level is won/lost; {"type":"endRound"} runs the whole round.
  */
 import { createGame, helpText } from '../src/sim/game.ts';
+import { canCondenseAt } from '../src/sim/bodies.ts';
 import type { Action, BodyKind, Game, GameState, ToolId } from '../src/sim/types.ts';
 import { TOOL_DEFS } from '../src/sim/tools.ts';
 import * as readline from 'node:readline';
@@ -74,7 +75,10 @@ export function asciiMap(s: GameState): string {
     const row: string[] = [];
     for (let i = 0; i < gw; i++) {
       const v = d[j * gw + i];
-      row.push(DCH[Math.min(DCH.length - 1, Math.floor((v / thr) * (DCH.length - 1)))]);
+      let c = Math.min(DCH.length - 1, Math.floor((v / thr) * (DCH.length - 1)));
+      // '@' only where a cloud can actually condense (dense enough, not next to a body, not inside a lens)
+      if (c === DCH.length - 1 && !canCondenseAt(s, (i + 0.5) * cell, (j + 0.5) * cell)) c--;
+      row.push(DCH[c]);
     }
     rows.push(row);
   }
@@ -92,7 +96,7 @@ export function asciiMap(s: GameState): string {
   for (const b of s.bodies) put(b.x, b.y, bc[b.kind]);
   const border = '+' + '-'.repeat(gw) + '+';
   return [border, ...rows.map((r) => '|' + r.join('') + '|'), border,
-    `R${s.round} ${s.phase} density: ' '..'%' = 0..${DCH.length - 2}/${DCH.length - 1} of cloud threshold ${thr.toFixed(2)}, '@' = cloud-forming | R repulsor | wall L lens P pulse X blackhole M redmatter | c cloud p planet S star G giant W dwarf N neutron B hole`].join('\n');
+    `R${s.round} ${s.phase} density: ' '..'%' = 0..${DCH.length - 2}/${DCH.length - 1} of cloud threshold ${thr.toFixed(2)}, '@' = a cloud can condense here ('%' = dense but blocked by a body/lens) | R repulsor | wall L lens P pulse X blackhole M redmatter | c cloud p planet S star G giant W dwarf N neutron B hole`].join('\n');
 }
 
 /** Dismiss intro/roundEnd cards so the player is in plan phase. */

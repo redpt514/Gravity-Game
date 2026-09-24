@@ -123,6 +123,8 @@ export interface Scoreboard {
   novae: number;                        // cumulative supernova events
   elements: Record<Element, number>;    // cumulative produced (fusion/nova output), not initial stock
   score: number;                        // aggregate
+  /** leftover energy credited to the score when the level is won (0 until then) */
+  energyBonus?: number;
 }
 
 export type Phase = 'intro' | 'plan' | 'running' | 'roundEnd' | 'won' | 'lost';

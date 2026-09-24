@@ -3,7 +3,7 @@ import { applyActions, createGame, debugSpawnBody } from '../src/sim/game.ts';
 import { LEVELS } from '../src/levels/levels.ts';
 import { TOOL_DEFS } from '../src/sim/tools.ts';
 import type { Action } from '../src/sim/types.ts';
-import { SOLUTIONS } from './solutions.ts';
+import { SOLUTIONS, replay } from './solutions.ts';
 
 describe('levels', () => {
   it('defines levels 1-5 with sane data', () => {
@@ -21,7 +21,7 @@ describe('levels', () => {
   for (const sol of SOLUTIONS) {
     it(`level ${sol.level} is won by its scripted solution`, () => {
       const g = createGame(sol.level);
-      const res = applyActions(g, sol.actions);
+      const res = replay(g, sol.actions);
       expect(res.every((r) => r.ok)).toBe(true);
       const s = g.state();
       expect(s.phase).toBe('won');
@@ -38,8 +38,10 @@ describe('levels', () => {
 
   it('winning level 5 grants the black hole reward', () => {
     const g = createGame(5);
-    applyActions(g, SOLUTIONS.find((x) => x.level === 5)!.actions);
+    replay(g, SOLUTIONS.find((x) => x.level === 5)!.actions);
+    expect(g.state().phase).toBe('won');
     expect(g.state().inventory.black_hole).toBe(1);
+    expect(g.help()).toMatch(/REWARD on win: black_hole x1/);
   }, 30000);
 });
 
@@ -79,11 +81,46 @@ describe('game rules', () => {
     expect(g.state().energy).toBe(70 - 60);
   });
 
+  it('rejects bad walls and stacked nodes with a reason', () => {
+    const g = createGame(2);
+    const bad = (a: Parameters<typeof g.apply>[0], re: RegExp) => {
+      const e = g.state().energy;
+      const r = g.apply(a);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(re);
+      expect(g.state().energy).toBe(e);
+    };
+    bad({ type: 'place', tool: 'wall', x: 80, y: 45 }, /end point/);
+    bad({ type: 'place', tool: 'wall', x: 80, y: 45, x2: 82, y2: 46 }, /too short/);
+    bad({ type: 'place', tool: 'wall', x: 10, y: 10, x2: 150, y2: 80 }, /too long/);
+    expect(g.apply({ type: 'place', tool: 'wall', x: 80, y: 0, x2: 80, y2: 45 }).ok).toBe(true);
+    bad({ type: 'place', tool: 'wall', x: 81, y: 1, x2: 81, y2: 44 }, /too close/);
+    expect(g.apply({ type: 'place', tool: 'repulsor', x: 40, y: 45 }).ok).toBe(true);
+    bad({ type: 'place', tool: 'repulsor', x: 42, y: 47 }, /too close/);
+    expect(g.apply({ type: 'place', tool: 'repulsor', x: 45, y: 45 }).ok).toBe(false); // energy, not spacing
+  });
+
+  it('winning scores leftover energy; losing lists only goals that were due', () => {
+    const g = createGame(1);
+    replay(g, SOLUTIONS[0].actions);
+    const s = g.state();
+    expect(s.phase).toBe('won');
+    expect(s.scoreboard.energyBonus).toBe(s.energy);
+    expect(s.scoreboard.score).toBeGreaterThanOrEqual(s.energy + 10);
+    const l = createGame(2);
+    applyActions(l, [{ type: 'endRound' }, { type: 'endRound' }]);
+    expect(l.state().phase).toBe('lost');
+    const msg = l.state().log.find((x) => x.includes('Level lost'))!;
+    expect(msg).toMatch(/2 clouds/);
+    expect(msg).not.toMatch(/planet/);
+  }, 30000);
+
   it('remove refunds 50% only in the round placed', () => {
     const g = createGame(1);
     g.apply({ type: 'place', tool: 'repulsor', x: 40, y: 40 });
     g.apply({ type: 'place', tool: 'repulsor', x: 100, y: 40 });
     const [n1, n2] = g.state().nodes;
+    expect(n2).toBeDefined();
     expect(g.apply({ type: 'remove', nodeId: n1.id }).ok).toBe(true);
     expect(g.state().energy).toBe(10 + 15);
     applyActions(g, [{ type: 'endRound' }]);
@@ -129,7 +166,7 @@ describe('game rules', () => {
   it('help() summarises rules, goals and tools', () => {
     const h = createGame(3).help();
     expect(h).toMatch(/GOALS/);
-    expect(h).toMatch(/lens: cost 55/);
+    expect(h).toMatch(/lens: cost 80/);
     expect(h).not.toMatch(/pulse:/);
   });
 });

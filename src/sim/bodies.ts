@@ -2,7 +2,7 @@ import { P } from './params.ts';
 import { sample } from './field.ts';
 import { currentAt, forEachFreeNear } from './particles.ts';
 import { TOOL_DEFS } from './tools.ts';
-import type { Body, BodyKind, Element, Node } from './types.ts';
+import type { Body, BodyKind, Element, GameState, Node } from './types.ts';
 import { ELEMENTS } from './types.ts';
 import type { World } from './world.ts';
 
@@ -118,21 +118,54 @@ export function moveBodies(w: World): void {
   const s = w.s;
   const gw = s.gridW, gh = s.gridH, cell = w.cell;
   const cur = { x: 0, y: 0 };
+  const a = s.width / 2, bb = s.height / 2;
+  const sw = P.swirl * (s.level.swirl ?? 1);
   for (const b of s.bodies) {
     const mob = b.kind === 'black_hole' ? P.bodyMobility * 0.3 : P.bodyMobility;
     const drift = b.kind === 'black_hole' ? 0 : P.bodyDrift;
     currentAt(w, b.x, b.y, cur);
+    // bodies are never fully becalmed in the corners: they feel at least bodyMinCurrent of the swirl
+    const dx = b.x - a, dy = b.y - bb;
+    const fx = (sw * dy) / bb, fy = (-sw * dx * bb) / (a * a);
+    const fl = P.bodyMinCurrent;
+    if (Math.hypot(cur.x, cur.y) < fl * Math.hypot(fx, fy)) { cur.x = fl * fx; cur.y = fl * fy; }
     let vx = b.vx * P.bodyDamping + mob * sample(w.fgx, gw, gh, cell, b.x, b.y) + drift * cur.x;
     let vy = b.vy * P.bodyDamping + mob * sample(w.fgy, gw, gh, cell, b.x, b.y) + drift * cur.y;
+    // soft edges: push bodies back toward the board instead of pinning them to it
+    const r = b.radius, m = r + P.bodyEdgeMargin, k = P.boundK;
+    if (b.x < m) vx += k * (m - b.x); else if (b.x > s.width - m) vx -= k * (b.x - (s.width - m));
+    if (b.y < m) vy += k * (m - b.y); else if (b.y > s.height - m) vy -= k * (b.y - (s.height - m));
     const v2 = vx * vx + vy * vy;
     if (v2 > P.bodyMaxSpeed * P.bodyMaxSpeed) { const f = P.bodyMaxSpeed / Math.sqrt(v2); vx *= f; vy *= f; }
     let x = b.x + vx, y = b.y + vy;
-    const r = b.radius;
-    if (x < r) { x = r; vx = 0; } else if (x > s.width - r) { x = s.width - r; vx = 0; }
-    if (y < r) { y = r; vy = 0; } else if (y > s.height - r) { y = s.height - r; vy = 0; }
+    if (x < r) { x = r; vx = Math.abs(vx) * 0.5; } else if (x > s.width - r) { x = s.width - r; vx = -Math.abs(vx) * 0.5; }
+    if (y < r) { y = r; vy = Math.abs(vy) * 0.5; } else if (y > s.height - r) { y = s.height - r; vy = -Math.abs(vy) * 0.5; }
     b.x = x; b.y = y; b.vx = vx; b.vy = vy;
     b.age++;
   }
+}
+
+/** Is (x,y) inside some lens's radius (times rMul)? */
+function inLens(s: GameState, x: number, y: number, rMul = 1): boolean {
+  for (const n of s.nodes) {
+    if (n.tool !== 'lens') continue;
+    const r = TOOL_DEFS.lens.radius * rMul;
+    const dx = x - n.x, dy = y - n.y;
+    if (dx * dx + dy * dy < r * r) return true;
+  }
+  return false;
+}
+
+/**
+ * Can a new cloud condense at (x,y)? Not near an existing body (it would just be accreted)
+ * and not inside a lens (lenses work on existing bodies only). Shared with the CLI's ASCII map.
+ */
+export function canCondenseAt(s: GameState, x: number, y: number): boolean {
+  for (const b of s.bodies) {
+    const dx = b.x - x, dy = b.y - y, lim = P.minBodySpacing + b.radius;
+    if (dx * dx + dy * dy < lim * lim) return false;
+  }
+  return !inLens(s, x, y, P.lensNoCloudR);
 }
 
 /** Bodies capture nearby free gas, nearest first, limited by a mass-dependent rate. */
@@ -141,13 +174,16 @@ export function accrete(w: World): void {
   const dist: number[] = [];
   const s = w.s, th = P.cloudDensity * w.meanDensity;
   for (const b of s.bodies) {
+    if (b.kind === 'neutron') continue; // remnant: too compact/hot to gather gas (see neutronMaxMass)
     const bh = b.kind === 'black_hole';
-    // well-fed bodies (sitting in dense gas) grow faster
-    let feed = sample(w.rhoS, s.gridW, s.gridH, w.cell, b.x, b.y) / th;
+    // growth follows the FREE gas density around the body (its own mass is not counted):
+    // squeezing gas into a body with repulsors/walls feeds it faster, starving it slows it down
+    let feed = sample(w.rhoF, s.gridW, s.gridH, w.cell, b.x, b.y) / th;
     feed = feed < P.accreteFeedMin ? P.accreteFeedMin : feed > P.accreteFeedMax ? P.accreteFeedMax : feed;
-    const rate = (P.accreteBase + P.accreteMassMul * b.mass) * feed * (bh ? 4 : 1);
+    const lensed = !bh && inLens(s, b.x, b.y);
+    const rate = (P.accreteBase + P.accreteMassMul * b.mass) * feed * (bh ? 4 : 1) * (lensed ? P.lensFeedMul : 1);
     let budget = (w.accreteBudget.get(b.id) ?? 0) + rate;
-    const R = b.radius * P.accreteMul + P.accreteAdd * (bh ? 3 : 1);
+    const R = b.radius * P.accreteMul + P.accreteAdd * (bh ? 3 : 1) + (lensed ? P.lensAccreteAdd : 0);
     if (budget >= 1) {
       cand.length = 0; dist.length = 0;
       forEachFreeNear(w, b.x, b.y, R, (k, d2) => { cand.push(k); dist.push(d2); });
@@ -169,7 +205,7 @@ export function accrete(w: World): void {
 /** Condense new clouds where smoothed density exceeds the threshold. */
 export function formClouds(w: World): void {
   const s = w.s;
-  const gw = s.gridW, gh = s.gridH, cell = w.cell, rhoS = w.rhoS;
+  const gw = s.gridW, gh = s.gridH, cell = w.cell, rhoS = w.rhoF;
   const cands: number[] = [];
   const th = P.cloudDensity * w.meanDensity;
   for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
@@ -191,15 +227,16 @@ export function formClouds(w: World): void {
   for (const k of cands) {
     if (made >= P.maxNewCloudsPerCheck) break;
     const cx = ((k % gw) + 0.5) * cell, cy = (Math.floor(k / gw) + 0.5) * cell;
-    let blocked = false;
-    for (const b of s.bodies) {
-      const dx = b.x - cx, dy = b.y - cy, lim = P.minBodySpacing + b.radius;
-      if (dx * dx + dy * dy < lim * lim) { blocked = true; break; }
-    }
-    if (blocked) continue;
-    const got: number[] = [];
-    forEachFreeNear(w, cx, cy, P.cloudCaptureR, (q) => { got.push(q); });
+    if (!canCondenseAt(s, cx, cy)) continue;
+    let got: number[] = [];
+    const gd: number[] = [];
+    forEachFreeNear(w, cx, cy, P.cloudCaptureR, (q, d2) => { got.push(q); gd.push(d2); });
     if (got.length < P.cloudMinParticles) continue;
+    if (got.length > P.cloudMaxBirthMass) {
+      // birth mass is capped: only the nearest particles condense, the rest must be accreted
+      const idx = got.map((_, i) => i).sort((i, j) => gd[i] - gd[j] || got[i] - got[j]);
+      got = idx.slice(0, P.cloudMaxBirthMass).map((i) => got[i]);
+    }
     let sx = 0, sy = 0;
     for (const q of got) { sx += s.particles[q].x; sy += s.particles[q].y; }
     const b = newBody(w, 'cloud', sx / got.length, sy / got.length);
@@ -213,6 +250,10 @@ export function formClouds(w: World): void {
 
 const STAGE: Record<BodyKind, number> = {
   cloud: 0, planet: 1, star_ms: 2, star_giant: 3, white_dwarf: 2, neutron: 2, black_hole: 5,
+};
+
+const REMNANT: Record<BodyKind, number> = {
+  cloud: 0, planet: 0, star_ms: 0, star_giant: 0, white_dwarf: 1, neutron: 2, black_hole: 3,
 };
 
 export function mergeBodies(w: World): void {
@@ -235,7 +276,9 @@ export function mergeBodies(w: World): void {
       big.vy = (big.vy * big.mass + small.vy * small.mass) / m;
       for (const e of ELEMENTS) big.composition[e] += small.composition[e];
       big.mass = m;
-      if (small.kind === 'black_hole' || (STAGE[small.kind] > STAGE[big.kind] && small.kind !== 'white_dwarf' && small.kind !== 'neutron')) {
+      // remnants dominate a merge (black hole > neutron star > white dwarf); otherwise the later stage wins
+      const rs = REMNANT[small.kind], rb = REMNANT[big.kind];
+      if (rs > rb || (rs === 0 && rb === 0 && STAGE[small.kind] > STAGE[big.kind])) {
         setKind(w, big, small.kind, true);
       }
       big.radius = radiusFor(big.kind, big.mass);
@@ -353,6 +396,14 @@ export function lifecycle(w: World): void {
         // a white dwarf fed past its limit detonates (type Ia)
         b.progress = Math.min(1, m / P.wdNovaMass);
         if (m >= P.wdNovaMass) supernova(w, b);
+        break;
+      case 'neutron':
+        // a neutron star pushed past its limit (by merging) collapses into a black hole
+        b.progress = Math.min(1, m / P.neutronMaxMass);
+        if (m >= P.neutronMaxMass) {
+          s.events.push({ round: s.round, tick: s.tick, x: b.x, y: b.y, mass: m, kind: 'collapse' });
+          setKind(w, b, 'black_hole');
+        }
         break;
       default:
         b.progress = 0;

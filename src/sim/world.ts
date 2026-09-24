@@ -12,7 +12,9 @@ export interface World {
   rippleSin: Float32Array;
   rippleCos: Float32Array;
   rho: Float32Array;      // free-particle density (particles per cell)
-  rhoS: Float32Array;     // smoothed density (3x3 avg)
+  rhoS: Float32Array;     // smoothed density incl. bodies' pressure fill (3x3 avg)
+  rhoF: Float32Array;     // smoothed FREE-gas density (cloud formation, accretion feed, public density)
+  lensPot: Float32Array;  // lens contribution to field (gas feels only lensGasFrac of it)
   src: Float32Array;      // gravity source
   grav: Float32Array;     // blurred gravity potential
   pot: Float32Array;      // total potential felt by gas (field - pressure)
@@ -36,7 +38,7 @@ export function makeWorld(s: GameState, rng: Rng): World {
   return {
     s, rng, nextBodyId: 1, nextNodeId: 1,
     cell: s.width / s.gridW,
-    ambientBase: f(), rippleSin: f(), rippleCos: f(), rho: f(), rhoS: f(), src: f(), grav: f(), pot: f(),
+    ambientBase: f(), rippleSin: f(), rippleCos: f(), rho: f(), rhoS: f(), rhoF: f(), lensPot: f(), src: f(), grav: f(), pot: f(),
     gx: f(), gy: f(), fgx: f(), fgy: f(), tmp: f(),
     cellStart: new Int32Array(n + 1),
     cellItems: new Int32Array(Math.max(1, s.particles.length)),

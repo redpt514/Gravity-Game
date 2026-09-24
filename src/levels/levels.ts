@@ -11,18 +11,18 @@ export const LEVELS: LevelDef[] = [
   },
   {
     id: 2, name: 'Nursery',
-    intro: 'Walls herd gas like fences. Clouds pull in nearby gas as they grow; a cloud of 40 mass becomes a planet.',
+    intro: 'Walls herd gas like fences: a long wall across the current dams it, and gas piles up on the upstream side. Clouds swallow the gas around them; a cloud of 40 mass becomes a planet.',
     seed: 202, particleCount: 2200, initialMix: { H: 1 },
     rounds: 3, ticksPerRound: 600, startingEnergy: 70, incomePerRound: 40, ambientGravity: 0.3,
     tools: ['repulsor', 'wall'],
     goals: [
       { type: 'clouds', count: 2, byRound: 2, label: 'Have 2 clouds (or bigger bodies)' },
-      { type: 'planets', count: 1, byRound: 3, label: 'Grow 1 planet (mass 40)' },
+      { type: 'planets', count: 2, byRound: 3, label: 'Grow 2 planets (mass 40)' },
     ],
   },
   {
     id: 3, name: 'Ignition',
-    intro: 'Pile 120 mass into one body and it ignites as a star. Lenses pull gas and bodies together so they merge.',
+    intro: 'Pile 120 mass into one body and it ignites as a star. Bodies grow faster in dense gas: keep squeezing gas into them. Lenses pull bodies together and feed them, but cannot make a cloud.',
     seed: 303, particleCount: 2400, initialMix: { H: 1 },
     rounds: 3, ticksPerRound: 600, startingEnergy: 90, incomePerRound: 50, ambientGravity: 0.3,
     tools: ['repulsor', 'wall', 'lens'],
@@ -35,8 +35,8 @@ export const LEVELS: LevelDef[] = [
     rounds: 4, ticksPerRound: 600, startingEnergy: 100, incomePerRound: 50, ambientGravity: 0.3,
     tools: ['repulsor', 'wall', 'lens', 'pulse'],
     goals: [
-      { type: 'stars', count: 1, byRound: 2, label: 'Ignite 1 star by round 2' },
-      { type: 'element', el: 'He', count: 40, byRound: 4, label: 'Fuse 40 helium' },
+      { type: 'stars', count: 1, byRound: 3, label: 'Ignite 1 star by round 3' },
+      { type: 'element', el: 'He', count: 120, byRound: 4, label: 'Fuse 120 helium' },
     ],
   },
   {
@@ -46,7 +46,7 @@ export const LEVELS: LevelDef[] = [
     rounds: 5, ticksPerRound: 600, startingEnergy: 100, incomePerRound: 60, ambientGravity: 0.3,
     tools: ['repulsor', 'wall', 'lens', 'pulse'],
     goals: [
-      { type: 'element', els: ['C', 'O'], count: 20, byRound: 4, label: 'Produce 20 carbon + oxygen (red giant)' },
+      { type: 'element', els: ['C', 'O'], count: 100, byRound: 5, label: 'Produce 100 carbon + oxygen (red giant)' },
       { type: 'novae', count: 1, byRound: 5, label: 'Trigger 1 supernova' },
     ],
     rewards: { black_hole: 1 },

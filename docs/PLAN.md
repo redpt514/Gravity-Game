@@ -25,29 +25,43 @@ tests/       vitest: determinism, lifecycle thresholds, level solvability (scrip
 ```
 Contract: `src/sim/types.ts`. UI only reads `GameState` and calls `Game.apply/step`.
 
-## Simulation model (mobile-cheap)
-- Board 160×90 world units; 64×36 potential grid `field`.
-- `field = ambient(center pull, pulsing) + Σ particle/body mass splat (blurred) + Σ node kernels`.
-- Free particles accelerate along −∇field (toward high pull), damped; nodes add repel/attract kernels.
-- Cell density > τ_cloud over a neighborhood → spawn **cloud** body capturing those particles.
-- Bodies accrete free particles within radius; mass thresholds: cloud → planet (m≥40) → star_ms (m≥120).
-- star_ms fuses H→He at rate ∝ mass; when H fraction < 30% → star_giant (He→C/O).
-  Giant m<250 → white_dwarf; m≥250 → **supernova**: ejects 60% of mass as free particles
-  (C/O/Fe/heavy mix), leaves neutron. Bodies with m≥600 collapse → black_hole.
+## Simulation model (mobile-cheap; numbers live in `src/sim/params.ts`)
+- Board 160×90 world units; 64×36 grid (2.5-unit cells). Thresholds scale with the level's mean density ρ̄ = particles / cells.
+- **Gas current**: divergence-free counter-clockwise ellipse around the centre (top flows left, right flows up),
+  fading toward the corners. Obstacles dam it: gas piles up on the *upstream* side.
+- `field = ambient(centre pull, pulsing, ripples) + G·blur(gas above 1.9ρ̄ + 0.1·body mass) + Σ node kernels`.
+  Bodies move along ∇field; free gas moves along ∇(field − pressure) but feels only **15% of lens kernels**.
+- Cloud forms where smoothed **free-gas** density ≥ 2.4ρ̄ (the `cloudThreshold`), at least 7 + r from any body and
+  **never inside a lens radius**. A new cloud takes at most the **30 nearest** particles (≥14 needed); the rest must be accreted.
+- Accretion rate per tick = (0.02 + 0.00015·m) × feed, feed = local free-gas density / threshold clamped to [0.1, 6]
+  (the body's own mass is not counted), ×1.8 and +1.5 radius inside a lens. So herding gas into a body in later rounds
+  grows it faster (L3: a round-2 repulsor upstream of the pile ≈ +50–80% mass).
+- Mass ladder: cloud → planet (m≥40) → star_ms (m≥120). star_ms fuses H→He at 2.2e-6·m²/tick; H < 30% → red giant
+  (He→C/O, 2.5× rate); out of He: m<250 → white dwarf, m≥250 → **supernova** (ejects 60% as gas incl. 15% Fe, 5% heavy;
+  leaves a neutron star). White dwarf fed to 320 → type Ia supernova. Neutron stars do not accrete; merged past 200 → black hole.
+  Any body ≥600 → black hole. In merges remnants dominate (black hole > neutron > white dwarf), otherwise the later stage wins.
+- Bodies drift with the current (never less than 50% of it, so none strand in corners) and are pushed off the edges softly.
+- Placement: walls need x2,y2 and length 5–50; same-tool nodes (wall midpoints) must be ≥4 apart; rejections carry a reason.
+- Costs: repulsor 30 (r16), wall 35, lens 80 (r18), pulse 40 (r20, one round). Score = 10/cloud + 50/star + 200/nova
+  + 1/element produced + **1/unspent energy on win**.
 - Scoreboard counts formations, novae, elements *produced* (fusion/nova output).
 
 ## Round loop (reverse TD)
 `intro → plan (place nodes, spend energy) → running (ticksPerRound) → roundEnd (goals w/ byRound
 checked; income paid) → plan … → won/lost`. Losing a goal by its round = level lost, restart.
 
-## Levels 1–5 (prototype scope)
-| # | Name | New idea | Goals (by round) | Rounds |
-|---|------|----------|------------------|--------|
-| 1 | First Light | repulsor, density | 1 cloud by r2 | 2 |
-| 2 | Nursery | wall, accretion | 2 clouds r2, 1 planet r3 | 3 |
-| 3 | Ignition | mass → star | 1 star r3 | 3 |
-| 4 | Forge | pulse, fusion timers | 1 star r2, 40 He r4 | 4 |
-| 5 | Nova | red giants, supernova | 1 nova r4, 20 C+O r5; reward: black_hole ×1 | 5 |
+## Levels 1–5 (prototype scope; reference lines in `tests/solutions.ts`, balance checks in `tests/balance.test.ts`)
+| # | Name | New idea | Goals (by round) | Rounds | Energy (start/+income) | Reference line → win round |
+|---|------|----------|------------------|--------|------|------|
+| 1 | First Light | repulsor, density | 1 cloud r2 | 2 | 70/+30 | repulsors (80,22)+(80,68) → R1 |
+| 2 | Nursery | wall, damming | 2 clouds r2, 2 planets r3 | 3 | 70/+40 | walls x=80 top+bottom → R2–R3 |
+| 3 | Ignition | density-fed growth → star | 1 star r3 | 3 | 90/+50 | top wall; R2 repulsor (105,15) squeezes pile → R2–R3 |
+| 4 | Forge | lens feeds a star, fusion | 1 star r3, 120 He r4 | 4 | 100/+50 | L3 line; R3 lens on the star → R4 |
+| 5 | Nova | red giants, supernova | 100 C+O r5, 1 nova r5; reward: black_hole ×1 | 5 | 100/+60 | same line → R4 |
+
+Checks (seeds 1–8 unless noted): reference lines win all; place-nothing loses all; a lone centre lens loses L3–L5
+(seeds 1–3); all-energy random pulses win L4 1/20, L5 2/20 (`npm run eval`).
+Reward tools land in the won state's `inventory`; pass them on with `createGame(level, seed, { inventory })`.
 
 ## Milestones (this session)
 1. **M1 sim + levels + CLI** (Opus agent) — `npm test`, `npm run play -- --level 1 --auto`.

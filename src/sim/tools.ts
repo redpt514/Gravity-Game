@@ -13,18 +13,18 @@ export const TOOL_DEFS: Record<ToolId, ToolDef> = {
   },
   wall: {
     id: 'wall', name: 'Wall',
-    description: 'Permanent anti-gravity segment (drag x,y to x2,y2, max 50 long): herds particles like a fence.',
+    description: 'Permanent anti-gravity segment (drag x,y to x2,y2, 5 to 50 long): herds particles like a fence; long walls dam the current.',
     cost: 35, radius: 5, strength: -6, durationRounds: null, unlockLevel: 2,
   },
   lens: {
     id: 'lens', name: 'Lens',
-    description: 'Permanent attractor: gathers particles and bodies toward its centre. Expensive.',
-    cost: 55, radius: 18, strength: 3, durationRounds: null, unlockLevel: 3,
+    description: 'Permanent attractor for bodies: pulls existing clouds, planets and stars toward its centre so they merge, and makes bodies inside it swallow gas faster. Barely tugs free gas and never makes a cloud by itself.',
+    cost: 80, radius: 18, strength: 3, durationRounds: null, unlockLevel: 3,
   },
   pulse: {
     id: 'pulse', name: 'Pulse',
     description: 'Strong one-round radial push that fades over the round, then vanishes.',
-    cost: 25, radius: 20, strength: -4, durationRounds: 1, unlockLevel: 4,
+    cost: 40, radius: 20, strength: -4, durationRounds: 1, unlockLevel: 4,
   },
   black_hole: {
     id: 'black_hole', name: 'Black Hole',

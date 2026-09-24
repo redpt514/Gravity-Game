@@ -92,3 +92,40 @@ describe('lifecycle', () => {
     expect(g.state().scoreboard.novae).toBe(0);
   });
 });
+
+describe('lifecycle fixes', () => {
+  it('a neutron star is not swallowed by a bigger main-sequence star; past its limit it collapses', () => {
+    const g = running(1);
+    const n = debugSpawnBody(g, 'neutron', 80, 45, 120);
+    debugSpawnBody(g, 'star_ms', 81, 45, 150);
+    g.step(1);
+    const s = g.state();
+    expect(s.bodies.some((b) => b.kind === 'star_ms')).toBe(false);
+    expect(s.bodies.find((b) => b.mass >= 270)!.kind).toBe('black_hole');
+    expect(s.bodies.some((b) => b.id === n.id) || s.bodies.length === 1).toBe(true);
+  });
+
+  it('a neutron star does not accrete gas', () => {
+    const g = running(1);
+    const n = debugSpawnBody(g, 'neutron', 80, 45, 100);
+    g.step(200);
+    expect(n.mass).toBe(100);
+  });
+
+  it('new clouds are born at most cloudMaxBirthMass', () => {
+    const g = running(4);
+    g.state().phase = 'plan';
+    g.apply({ type: 'place', tool: 'pulse', x: 80, y: 45 });
+    g.state().phase = 'running';
+    const born: number[] = [];
+    for (let i = 0; i < 300; i++) { const before = new Set(g.state().bodies.map((b) => b.id)); g.step(1); for (const b of g.state().bodies) if (!before.has(b.id)) born.push(b.mass); }
+    for (const m of born) expect(m).toBeLessThanOrEqual(P.cloudMaxBirthMass);
+  });
+
+  it('bodies do not stick to the board edge', () => {
+    const g = running(1);
+    const b = debugSpawnBody(g, 'planet', 158, 2, 60);
+    g.step(120);
+    expect(b.x < 150 || b.y > 10).toBe(true);
+  });
+});

@@ -42,7 +42,7 @@ function newWorld(levelId: number, seed: number | undefined, opts: GameOptions):
     log: [level.intro],
   };
   const w = makeWorld(s, rng);
-  s.density = w.rhoS;
+  s.density = w.rhoF;
   s.cloudThreshold = P.cloudDensity * w.meanDensity;
   initAmbient(w);
   computeField(w);
@@ -56,7 +56,8 @@ function updateScore(s: GameState): void {
   for (const k of ['star_ms', 'star_giant', 'white_dwarf', 'neutron', 'black_hole'] as BodyKind[]) stars += sb.starsByKind[k];
   let el = 0;
   for (const e of ELEMENTS) el += sb.elements[e];
-  sb.score = Math.round(sb.cloudsFormed * P.scoreCloud + stars * P.scoreStar + sb.novae * P.scoreNova + el * P.scorePerElement);
+  sb.score = Math.round(sb.cloudsFormed * P.scoreCloud + stars * P.scoreStar + sb.novae * P.scoreNova + el * P.scorePerElement
+    + (sb.energyBonus ?? 0));
 }
 
 /** One simulation tick. */
@@ -114,12 +115,16 @@ export const createGame = ((levelId: number, seed?: number, opts: GameOptions = 
     });
     if (v === 'won') {
       s.phase = 'won';
+      s.scoreboard.energyBonus = Math.round(s.energy * P.scorePerEnergy);
+      updateScore(s);
       const rw = s.level.rewards ?? {};
       for (const k of Object.keys(rw) as ToolId[]) s.inventory[k] = (s.inventory[k] ?? 0) + (rw[k] ?? 0);
-      log(w, `LEVEL WON! Score ${s.scoreboard.score}`);
+      log(w, `LEVEL WON! Score ${s.scoreboard.score} (incl. +${s.scoreboard.energyBonus} for unspent energy)`);
     } else if (v === 'lost') {
       s.phase = 'lost';
-      const miss = s.goals.filter((g) => !g.met).map((g) => `${g.goal.label} (${g.current}/${g.goal.count})`);
+      // only goals that were due by now (or all, if this was the last round)
+      const due = (g: { goal: { byRound: number } }) => g.goal.byRound <= s.round || s.round >= s.level.rounds;
+      const miss = s.goals.filter((g) => !g.met && due(g)).map((g) => `${g.goal.label} (${g.current}/${g.goal.count})`);
       log(w, `Level lost: missed ${miss.join('; ')}`);
     } else {
       s.phase = 'roundEnd';
@@ -152,14 +157,20 @@ export const createGame = ((levelId: number, seed?: number, opts: GameOptions = 
           if (!inBoard(s, a.x, a.y)) return { ok: false, reason: 'position outside board' };
           let x2: number | undefined, y2: number | undefined;
           if (a.tool === 'wall') {
-            x2 = a.x2 ?? a.x + 20; y2 = a.y2 ?? a.y;
+            if (a.x2 === undefined || a.y2 === undefined) return { ok: false, reason: 'wall needs an end point (x2, y2)' };
+            x2 = a.x2; y2 = a.y2;
             if (!inBoard(s, x2, y2)) return { ok: false, reason: 'wall endpoint outside board' };
             const len = Math.hypot(x2 - a.x, y2 - a.y);
-            if (len > WALL_MAX_LEN) {
-              const f = WALL_MAX_LEN / len;
-              x2 = a.x + (x2 - a.x) * f; y2 = a.y + (y2 - a.y) * f;
-            }
+            if (len < P.wallMinLen) return { ok: false, reason: `wall too short (${len.toFixed(1)} < ${P.wallMinLen})` };
+            if (len > WALL_MAX_LEN) return { ok: false, reason: `wall too long (${len.toFixed(1)} > ${WALL_MAX_LEN})` };
           }
+          const ax = a.tool === 'wall' ? (a.x + x2!) / 2 : a.x, ay = a.tool === 'wall' ? (a.y + y2!) / 2 : a.y;
+          const clash = s.nodes.find((n) => {
+            if (n.tool !== a.tool) return false;
+            const nx = n.x2 !== undefined ? (n.x + n.x2) / 2 : n.x, ny = n.y2 !== undefined ? (n.y + (n.y2 ?? n.y)) / 2 : n.y;
+            return Math.hypot(nx - ax, ny - ay) < P.nodeMinSpacing;
+          });
+          if (clash) return { ok: false, reason: `too close to ${a.tool} #${clash.id} (min ${P.nodeMinSpacing} apart)` };
           const free = inv > 0;
           if (!free && s.energy < def.cost) return { ok: false, reason: `not enough energy (${s.energy} < ${def.cost})` };
           if (free) s.inventory[a.tool] = inv - 1; else s.energy -= def.cost;
@@ -231,10 +242,16 @@ export function helpText(s: GameState): string {
   lines.push('RULES: Gas circulates counter-clockwise (on screen) around the centre: right side flows up, top flows left, left flows down, bottom flows right. '
     + 'It spreads out under its own pressure. Block or squeeze the current with nodes: gas piles up upstream of obstacles, and where the pile gets dense '
     + `(~${(P.cloudDensity * mean).toFixed(1)} particles per 2.5x2.5 cell, ${P.cloudDensity}x the average) a CLOUD condenses. `
-    + 'Bodies drift with the current, slowly swallow nearby gas, and merge when they touch (lenses pull them together). '
+    + 'Bodies drift with the current and swallow nearby gas at a rate set by how dense the gas around them is (so herding gas into a body grows it faster); they merge when they touch. '
+    + `Lenses pull bodies together and make bodies inside them feed ${P.lensFeedMul}x faster, but barely move gas and no cloud forms inside a lens. `
+    + `New clouds hold at most ${P.cloudMaxBirthMass} mass. `
     + `Mass ${P.planetMass}: planet. Mass ${P.starMass}: star (fuses H->He; heavier burns much faster). H below ${P.giantHFrac * 100}%: red giant (fuses He->C+O). `
     + `Giant out of He: white dwarf, or SUPERNOVA if mass >= ${P.novaMass} (ejects ${P.novaEjectFrac * 100}% as C/O/Fe/heavy gas, leaves a neutron star). `
-    + `A white dwarf fed to ${P.wdNovaMass} also explodes. Mass >= ${P.collapseMass}: black hole.`);
+    + `A white dwarf fed to ${P.wdNovaMass} also explodes. Neutron stars do not feed; merged past ${P.neutronMaxMass} they collapse. Mass >= ${P.collapseMass}: black hole.`);
+  if (L.rewards) lines.push('REWARD on win: ' + Object.entries(L.rewards).map(([k, v]) => `${k} x${v}`).join(', ')
+    + ' (free uses, added to state.inventory; carry them into another level with createGame(levelId, seed, { inventory }))');
+  lines.push('SCORE: clouds x' + P.scoreCloud + ', stars x' + P.scoreStar + ', supernovae x' + P.scoreNova + ', +1 per element produced, +'
+    + P.scorePerEnergy + ' per unspent energy when you win.');
   lines.push('LOOP: plan (place/remove nodes, removal same round refunds 50%) -> endRound -> sim runs -> goals checked, income paid -> next plan. Miss a goal by its round = lose.');
   const avail = new Set<ToolId>([...L.tools, ...(Object.keys(s.inventory) as ToolId[]).filter((k) => (s.inventory[k] ?? 0) > 0)]);
   lines.push('TOOLS:');
@@ -243,7 +260,7 @@ export function helpText(s: GameState): string {
     const inv = s.inventory[t] ? ` (free x${s.inventory[t]})` : '';
     lines.push(`  ${t}: cost ${d.cost}${inv}, radius ${d.radius}, ${d.durationRounds === null ? 'permanent' : d.durationRounds + ' round'}. ${d.description}`);
   }
-  lines.push('ACTIONS (JSON): {"type":"place","tool":"repulsor","x":80,"y":45} | wall adds "x2","y2" | {"type":"remove","nodeId":1} | {"type":"endRound"} | {"type":"restart"}');
+  lines.push('ACTIONS (JSON): {"type":"place","tool":"repulsor","x":80,"y":45} | wall needs "x2","y2" (length ${P.wallMinLen}-${P.wallMaxLen}) | nodes of one tool must be ${P.nodeMinSpacing}+ apart | {"type":"remove","nodeId":1} | {"type":"endRound"} | {"type":"restart"}');
   return lines.join('\n');
 }
 
