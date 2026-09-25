@@ -44,7 +44,7 @@ export interface Body {
 export type ToolId =
   | 'repulsor'     // point anti-gravity node, medium radius, permanent
   | 'wall'         // short line repulsor (placed as segment: x,y,x2,y2), permanent
-  | 'pulse'        // one-round strong radial push, then fades
+  | 'pulse'        // strong radial push for durationSec, then fades
   | 'lens'         // attractor node (focuses particles), permanent, expensive
   | 'black_hole'   // consumes particles, huge gravity; reward tool
   | 'red_matter';  // converts nearby cloud instantly to collapse (skip fusion); reward tool
@@ -56,7 +56,7 @@ export interface ToolDef {
   cost: number;          // dark energy
   radius: number;        // effect radius in world units
   strength: number;      // signed: negative = repel, positive = attract
-  durationRounds: number | null; // null = permanent
+  durationSec: number | null;   // game seconds the effect lasts; null = permanent
   unlockLevel: number;   // first level where available in the palette
 }
 
@@ -65,8 +65,10 @@ export interface Node {
   tool: ToolId;
   x: number; y: number;
   x2?: number; y2?: number;      // wall endpoint
-  roundsLeft: number | null;     // null = permanent
-  placedRound: number;
+  /** game time (s) when placed */
+  placedAt: number;
+  /** game time (s) when a timed node (pulse) expires; null = permanent */
+  expiresAt: number | null;
   /** black_hole only: current mass (grows as it swallows) */
   mass?: number;
   /** true if placed from the free reward inventory (refund goes back to inventory) */
@@ -74,13 +76,13 @@ export interface Node {
 }
 
 export type GoalType =
-  | 'clouds'        // >= count bodies of kind cloud|planet|star* (any bound mass) at round end
+  | 'clouds'        // >= count bodies of kind cloud|planet|star* (any bound mass) right now
   | 'planets'       // >= count planets (includes stars, since planets may have progressed)
   | 'stars'         // >= count stars of any kind (ms|giant|white_dwarf|neutron)
   | 'star_kind'     // >= count of a specific BodyKind (param kind)
   | 'element'       // >= amount of Element produced cumulatively (param el)
   | 'novae'         // >= count supernova events cumulatively
-  | 'density';      // max cell density >= value at round end (tutorial only)
+  | 'density';      // max cell density >= value (tutorial only)
 
 export interface Goal {
   type: GoalType;
@@ -89,55 +91,66 @@ export interface Goal {
   el?: Element;
   /** element goals: if set, sum of these elements (e.g. ['C','O']); overrides el */
   els?: Element[];
-  /** Must be satisfied by END of this round (1-based). Level is lost if not. */
-  byRound: number;
+  /** Countdown: seconds of game time from level start to meet this goal. Met goals latch. */
+  deadlineSec: number;
+  /** points awarded when met; more if met early (see POINTS in src/sim/params.ts) */
+  points: number;
   label: string;   // player-facing, e.g. "Form 1 particle cloud"
 }
 
 export interface LevelDef {
   id: number;                 // 1..5 for now
   name: string;
-  intro: string;              // 1-3 short sentences shown before round 1
+  intro: string;              // 1-3 short sentences shown on the intro card
   seed: number;
   particleCount: number;
   /** element mix of initial particles, weights */
   initialMix: Partial<Record<Element, number>>;
-  rounds: number;             // total rounds
-  ticksPerRound: number;      // sim ticks advanced per round (e.g. 600 = 20 s)
   startingEnergy: number;
-  incomePerRound: number;
+  /** dark energy trickles in continuously */
+  incomePerSec: number;
   ambientGravity: number;     // baseline pull toward board center, 0..1
   /** strength multiplier of the counter-clockwise gas current around the centre (default 1) */
   swirl?: number;
   tools: ToolId[];            // palette for this level
-  goals: Goal[];              // all must be met by their byRound
+  goals: Goal[];              // each has its own countdown (deadlineSec)
   /** Free reward tools granted on win (added to inventory for later levels) */
   rewards?: Partial<Record<ToolId, number>>;
-  /** procedural levels: the calibration bot's winning line (tests/solutions.ts style: each endRound runs one round) */
-  solution?: Action[];
+  /** procedural levels: the calibration bot's winning line as timed actions */
+  solution?: TimedAction[];
 }
 
-export interface NovaEvent { round: number; tick: number; x: number; y: number; mass: number; kind: 'supernova' | 'collapse' }
+export interface NovaEvent { t: number; x: number; y: number; mass: number; kind: 'supernova' | 'collapse' }
+
+/** An action scheduled at game time t (seconds). Used by solutions, the calibration bot and replays. */
+export interface TimedAction { t: number; action: Action }
 
 export interface Scoreboard {
   cloudsFormed: number;                 // cumulative
   starsByKind: Record<BodyKind, number>; // cumulative formations per kind
   novae: number;                        // cumulative supernova events
   elements: Record<Element, number>;    // cumulative produced (fusion/nova output), not initial stock
-  score: number;                        // aggregate
-  /** leftover energy credited to the score when the level is won (0 until then) */
-  energyBonus?: number;
+  /** POINTS: the player's score. Earned live from creation, spent on hints. Never negative. */
+  points: number;
+  /** where the points came from (for the end card); spentHints is a positive number subtracted */
+  pointsBy: { clouds: number; planets: number; stars: number; novae: number; elements: number; goals: number; spentHints: number };
 }
 
-export type Phase = 'intro' | 'plan' | 'running' | 'roundEnd' | 'won' | 'lost';
+/**
+ * Continuous play. 'intro': card shown, sim paused. 'playing': sim runs, player places any time.
+ * 'cleared': all goals met; the grid KEEPS RUNNING and points keep accruing until the player moves on.
+ * There is no hard loss: a goal whose countdown hits 0 unmet is marked `missed` (costs a star, no bonus)
+ * but stays completable. Stars = 3 - missed goals (min 1) once cleared.
+ */
+export type Phase = 'intro' | 'playing' | 'cleared';
 
 export interface GameState {
   levelId: number;
   level: LevelDef;
   seed: number;
   phase: Phase;
-  round: number;              // 1-based current round
-  tick: number;               // ticks elapsed in current round
+  /** game time in seconds since level start (totalTick / TICKS_PER_SECOND) */
+  time: number;
   totalTick: number;
   energy: number;             // dark energy available
   inventory: Partial<Record<ToolId, number>>; // reward tools (free uses)
@@ -153,29 +166,61 @@ export interface GameState {
   cloudThreshold?: number;
   width: number; height: number;   // world units
   scoreboard: Scoreboard;
-  goals: { goal: Goal; current: number; met: boolean }[];
-  events: NovaEvent[];        // this round's events for VFX
+  goals: GoalStatus[];
+  /** 0 until cleared, then 1..3 */
+  stars: number;
+  /** most recent hint (UI shows it as a ghost placement until acted on or dismissed) */
+  hint: Hint | null;
+  events: NovaEvent[];        // recent events (last ~5 s) for VFX
   log: string[];              // last few human-readable events ("Cloud formed", "Star ignited")
 }
 
 export type Action =
   | { type: 'place'; tool: ToolId; x: number; y: number; x2?: number; y2?: number }
-  | { type: 'remove'; nodeId: number }        // full refund if placed this round (never simulated); no refund otherwise
-  | { type: 'move'; nodeId: number; x: number; y: number; x2?: number; y2?: number } // free; only nodes placed this round
-  | { type: 'endRound' }                      // intro->plan, roundEnd->plan (next round), plan->running; step()/runRound() advance ticksPerRound
-  | { type: 'start' }                         // dismiss intro/roundEnd card -> plan (place/remove/endRound also do this)
+  | { type: 'remove'; nodeId: number }        // full refund within GRACE_SEC of placing; no refund after
+  | { type: 'move'; nodeId: number; x: number; y: number; x2?: number; y2?: number } // free, only within GRACE_SEC of placing
+  | { type: 'hint' }                          // costs points (POINTS.hintCost, rising per use); sets state.hint
+  | { type: 'start' }                         // intro -> playing
   | { type: 'restart' };
 
-export interface ActionResult { ok: boolean; reason?: string }
+export interface ActionResult { ok: boolean; reason?: string; hint?: Hint }
+
+export interface GoalStatus {
+  goal: Goal;
+  current: number;
+  met: boolean;
+  /** game time it was met, if met */
+  metAt?: number;
+  /** countdown reached 0 before it was met */
+  missed: boolean;
+  /** seconds left on the countdown (0 once expired; frozen once met) */
+  remainingSec: number;
+}
+
+/** A suggested placement from the hint engine. */
+export interface Hint {
+  tool: ToolId;
+  x: number; y: number; x2?: number; y2?: number;
+  /** one short player-facing sentence: why this helps (e.g. "Dam the current above the cloud to feed it") */
+  reason: string;
+  /** which goal it targets (index into goals) */
+  goalIndex: number;
+  /** points paid for it */
+  cost: number;
+  at: number; // game time issued
+}
+
+/** Moves/removals are free (full refund) for this many game seconds after placing. */
+export const GRACE_SEC = 5;
 
 /** The headless-playable game. UI and the CLI both drive this interface. */
 export interface Game {
   state(): GameState;
   apply(a: Action): ActionResult;
-  /** advance n ticks while phase==='running' (UI animates by stepping); returns true if round still running */
-  step(n?: number): boolean;
-  /** convenience: run the round to completion synchronously */
-  runRound(): void;
+  /** advance n ticks while phase is 'playing' or 'cleared' (UI animates by stepping; pause = don't call). */
+  step(n?: number): void;
+  /** convenience: advance `seconds` of game time synchronously */
+  runFor(seconds: number): void;
   /** Player-facing rule summary for the current level/tools, for tutorials and agents */
   help(): string;
 }
@@ -210,4 +255,15 @@ export interface GameOptions {
  * `generateLevel(n, world)` in src/levels/procgen.ts is deterministic in (n, world) and may take a few seconds.
  * Worker (src/levels/procgen.worker.ts): postMessage({ n, world }) -> replies { n, key, level: LevelDef }
  * where key = levelCacheKey(n, world) from catalog.ts.
+ */
+
+// ---- v0.3 contract: continuous play, countdown goals, points, hints ----
+/*
+ * POINTS (sim-owned constants in src/sim/params.ts, shown in help()):
+ *   cloud formed, planet formed, star by kind (ms < giant < white_dwarf < neutron), supernova,
+ *   per unit of element produced (heavier = more), goal met (goal.points x early-finish multiplier).
+ * Hints: apply({type:'hint'}) -> costs POINTS.hintCost x (1 + hintsUsed); rejected with a reason if the
+ * player can't afford it. The hint engine picks a concrete placement for the most urgent unmet goal
+ * (short lookahead on a cloned world or the calibration bot's heuristic) that the player can afford.
+ * CLI (scripts/play.ts): actions as JSON lines plus {"type":"advance","seconds":N}, {"type":"state"}, {"type":"help"}.
  */
