@@ -480,16 +480,15 @@ a {
 }
 
 /* ---------- toasts ---------- */
-/* anchored to the bottom of #h-top-layer (position:relative below), so it always sits just
- * under the top bar/goals regardless of how tall they wrap to at a given viewport */
+/* pinned just above the bottom bar so toasts sit at the board's edge, not over its middle
+ * (newest nearest the bar) */
 .toast-stack {
-  position: absolute;
+  position: fixed;
   left: 50%;
-  top: 100%;
-  margin-top: 6px;
+  bottom: calc(84px + env(safe-area-inset-bottom, 0px));
   transform: translateX(-50%);
   display: flex;
-  flex-direction: column;
+  flex-direction: column-reverse;
   align-items: center;
   gap: 6px;
   pointer-events: none;

@@ -168,7 +168,8 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
 
   let lastPaletteKey = '';
   let lastPhase = '';
-  let lastLogLen = -1;
+  let lastLogLine: string | null = null;
+  let lastLogTime = 0;
   let lastLogRenderKey = '';
   let lastSelectedTool: ToolId | null = null;
   let lastGoalKey = '';
@@ -242,16 +243,22 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     el.scoreDrawer.hidden = !ui.scoreboardOpen;
     if (ui.scoreboardOpen) el.scoreDrawer.innerHTML = `<div class="scorelist">${renderScoreboardRows(state)}</div>`;
 
-    if (lastLogLen < 0 || state.log.length < lastLogLen) {
-      lastLogLen = state.log.length; // first render, or a restart reset the log — resync without toasting
-    } else if (state.log.length > lastLogLen) {
-      for (let i = lastLogLen; i < state.log.length; i++) {
-        const line = state.log[i];
-        const warn = /missed/i.test(line);
-        toaster.show(line, warn ? 'warn' : 'info');
+    // The sim keeps only the last few log lines, so track the last line we saw (lines carry a
+    // time prefix, so they're unique enough) instead of the log's length, which stops growing.
+    const logNow = state.log;
+    if (lastLogLine === null || state.time < lastLogTime) {
+      // first render or a restart (clock went backwards): resync without toasting
+    } else {
+      const from = lastLogLine === '' ? 0 : logNow.lastIndexOf(lastLogLine) + 1;
+      for (let i = Math.max(0, from); i < logNow.length; i++) {
+        const line = logNow[i];
+        const text = line.replace(/^\s*\d+(?:\.\d+)?s:\s*/, '');
+        if (/^(Clock started|Hint\b)/i.test(text)) continue; // hints already toast with a Place-it button
+        toaster.show(text, /missed/i.test(text) ? 'warn' : 'info');
       }
-      lastLogLen = state.log.length;
     }
+    lastLogLine = logNow.length ? logNow[logNow.length - 1] : '';
+    lastLogTime = state.time;
     el.logDrawer.hidden = !ui.logOpen;
     if (ui.logOpen) {
       const last8 = state.log.slice(-8);

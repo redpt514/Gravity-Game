@@ -18,7 +18,7 @@ export interface ToastManager {
 
 const LIFETIME_MS = 4000;
 const FADE_MS = 300;
-const MAX_STACK = 5;
+const MAX_STACK = 3;
 
 export function createToastManager(container: HTMLElement): ToastManager {
   function show(msg: string, kindOrOpts: 'info' | 'warn' | ToastOptions = 'info') {
