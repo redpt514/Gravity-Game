@@ -188,7 +188,7 @@ export function runBot(level: LevelDef, world: BoardSize, opts: { horizonSec: nu
   const names = opts.variants ?? Object.keys(VARIANTS);
   const score = opts.score ?? defaultScorer;
   const horizon = Math.ceil(opts.horizonSec / ACT_SEC) * ACT_SEC;
-  const screen = Math.min(horizon, opts.screenSec ?? 2 * ROUND_SEC);
+  const screen = Math.min(horizon, opts.screenSec ?? 30);
   let runners = names.map((n) => startRunner(n, level, world));
   for (let t = 0; t < screen; t += ACT_SEC) for (const x of runners) playSpan(x);
   if (runners.length > 1 && screen < horizon) {

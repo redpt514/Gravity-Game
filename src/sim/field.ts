@@ -3,30 +3,55 @@ import { TOOL_DEFS } from './tools.ts';
 import type { Node } from './types.ts';
 import type { World } from './world.ts';
 
-/** Separable box blur (running sums, clamped edges), `passes` times. src may equal dst. */
+let colAcc = new Float64Array(0);
+
+/**
+ * Separable box blur (running sums, clamped edges), `passes` times. src may equal dst.
+ * Interior samples skip the edge clamps and the vertical pass runs row by row (one running sum per column);
+ * every sum is updated in the same order as the plain clamped loops, so results are identical.
+ */
 export function boxBlur(src: Float32Array, dst: Float32Array, tmp: Float32Array, w: number, h: number, r: number, passes: number): void {
   if (src !== dst) dst.set(src);
   const inv = 1 / (2 * r + 1);
+  const wl = w - 1, hl = h - 1;
+  if (colAcc.length < w) colAcc = new Float64Array(w);
+  const ca = colAcc;
+  const x1 = Math.max(r, 0), x2 = Math.max(x1, w - r - 1);
   for (let p = 0; p < passes; p++) {
     // horizontal: dst -> tmp
     for (let y = 0; y < h; y++) {
       const row = y * w;
       let acc = 0;
-      for (let k = -r; k <= r; k++) acc += dst[row + (k < 0 ? 0 : k >= w ? w - 1 : k)];
-      for (let x = 0; x < w; x++) {
+      for (let k = -r; k <= r; k++) acc += dst[row + (k < 0 ? 0 : k >= w ? wl : k)];
+      let x = 0;
+      for (; x < x1 && x < w; x++) {
         tmp[row + x] = acc * inv;
         const add = x + r + 1, rem = x - r;
-        acc += dst[row + (add >= w ? w - 1 : add)] - dst[row + (rem < 0 ? 0 : rem)];
+        acc += dst[row + (add >= w ? wl : add)] - dst[row + (rem < 0 ? 0 : rem)];
+      }
+      for (; x < x2; x++) {
+        tmp[row + x] = acc * inv;
+        acc += dst[row + x + r + 1] - dst[row + x - r];
+      }
+      for (; x < w; x++) {
+        tmp[row + x] = acc * inv;
+        const add = x + r + 1, rem = x - r;
+        acc += dst[row + (add >= w ? wl : add)] - dst[row + (rem < 0 ? 0 : rem)];
       }
     }
-    // vertical: tmp -> dst
-    for (let x = 0; x < w; x++) {
-      let acc = 0;
-      for (let k = -r; k <= r; k++) acc += tmp[(k < 0 ? 0 : k >= h ? h - 1 : k) * w + x];
-      for (let y = 0; y < h; y++) {
-        dst[y * w + x] = acc * inv;
-        const add = y + r + 1, rem = y - r;
-        acc += tmp[(add >= h ? h - 1 : add) * w + x] - tmp[(rem < 0 ? 0 : rem) * w + x];
+    // vertical: tmp -> dst, all columns at once
+    for (let x = 0; x < w; x++) ca[x] = 0;
+    for (let k = -r; k <= r; k++) {
+      const row = (k < 0 ? 0 : k >= h ? hl : k) * w;
+      for (let x = 0; x < w; x++) ca[x] += tmp[row + x];
+    }
+    for (let y = 0; y < h; y++) {
+      const out = y * w;
+      const add = y + r + 1, rem = y - r;
+      const ra = (add >= h ? hl : add) * w, rr = (rem < 0 ? 0 : rem) * w;
+      for (let x = 0; x < w; x++) {
+        dst[out + x] = ca[x] * inv;
+        ca[x] += tmp[ra + x] - tmp[rr + x];
       }
     }
   }

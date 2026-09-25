@@ -387,7 +387,7 @@ export function hashState(s: GameState): string {
     h ^= (q >>> 16) & 0xff; h = Math.imul(h, 0x01000193);
     h ^= (q >>> 24) & 0xff; h = Math.imul(h, 0x01000193);
   };
-  mix(s.time); mix(s.totalTick); mix(s.energy); mix(s.scoreboard.points);
+  mix(s.time); mix(s.totalTick); mix(s.energy);
   for (const p of s.particles) { mix(p.x); mix(p.y); mix(p.vx); mix(p.vy); mix(p.bodyId); mix(ELEMENTS.indexOf(p.el)); }
   for (const b of s.bodies) { mix(b.id); mix(b.x); mix(b.y); mix(b.mass); for (const e of ELEMENTS) mix(b.composition[e]); }
   for (const n of s.nodes) { mix(n.id); mix(n.x); mix(n.y); }

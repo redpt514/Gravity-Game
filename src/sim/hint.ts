@@ -14,8 +14,8 @@ import { worldOf, type World } from './world.ts';
 import { goalValue } from '../levels/goals.ts';
 import type { Game } from './types.ts';
 
-/** Total lookahead ticks for a 3000-particle level (scaled by particle count); split over the candidates. */
-export const HINT_TICK_BUDGET = 270;
+/** Total lookahead ticks for a 3000-particle level (~1 ms each in node; scaled by particle count), split over the candidates. */
+export const HINT_TICK_BUDGET = 240;
 export const HINT_MAX_CANDIDATES = 4;
 
 const STAR_KINDS: BodyKind[] = ['star_ms', 'star_giant', 'white_dwarf', 'neutron'];
@@ -194,7 +194,8 @@ export function computeHint(w: World, fork: (w: World) => Game): Omit<Hint, 'cos
   }
   const cands = candidates(s, goal, usable).slice(0, HINT_MAX_CANDIDATES);
   if (cands.length === 0) return 'no useful placement found with the tools you can afford right now';
-  const perTick = Math.max(0.3, s.particles.length / 3000);
+  // relative tick cost vs a 3000-particle level (grid work is fixed, particle work scales)
+  const perTick = 0.4 + 0.6 * (s.particles.length / 3000);
   const horizon = Math.max(30, Math.min(300, Math.floor(HINT_TICK_BUDGET / perTick / cands.length)));
   let best: { c: Cand; v: number } | null = null;
   for (const c of cands) {

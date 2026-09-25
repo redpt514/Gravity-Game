@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { applyActions, createGame, debugSpawnBody } from '../src/sim/game.ts';
+import { createGame, debugSpawnBody, playTimeline } from '../src/sim/game.ts';
 import { forceAt } from '../src/sim/force.ts';
 import { computeField } from '../src/sim/field.ts';
 import { worldOf } from '../src/sim/world.ts';
 import { DEFAULT_WORLD, worldSizeForAspect } from '../src/sim/worldSize.ts';
 import { getLevel } from '../src/levels/levels.ts';
-import type { Action } from '../src/sim/types.ts';
+import type { TimedAction } from '../src/sim/types.ts';
 import { replay } from './solutions.ts';
 
 describe('adaptive world size', () => {
@@ -15,7 +15,7 @@ describe('adaptive world size', () => {
   });
 
   for (const aspect of [0.6, 2.2]) {
-    it(`level 1 at aspect ${aspect}: pinching the current wins, placing nothing loses`, () => {
+    it(`level 1 at aspect ${aspect}: pinching the current clears it, placing nothing misses the goal`, () => {
       const world = worldSizeForAspect(aspect);
       const W = world.width, H = world.height;
       // pinch the current against the board's long edges (across the short dimension)
@@ -26,12 +26,12 @@ describe('adaptive world size', () => {
         expect([s.width, s.height, s.gridW, s.gridH]).toEqual([W, H, world.gridW, world.gridH]);
         expect(s.field.length).toBe(world.gridW * world.gridH);
         expect(s.particles.every((p) => p.x >= 0 && p.x <= W && p.y >= 0 && p.y <= H)).toBe(true);
-        const acts: Action[] = [...pts.map(([x, y]) => ({ type: 'place', tool: 'repulsor', x, y }) as Action), { type: 'endRound' }, { type: 'endRound' }];
+        const acts: TimedAction[] = pts.map(([x, y]) => ({ t: 0, action: { type: 'place', tool: 'repulsor', x, y } }));
         expect(replay(g, acts).every((r) => r.ok)).toBe(true);
-        expect(`seed ${seed}: ${g.state().phase}`).toBe(`seed ${seed}: won`);
+        expect(`seed ${seed}: ${g.state().phase}`).toBe(`seed ${seed}: cleared`);
         const idle = createGame(1, seed, { world });
-        applyActions(idle, [{ type: 'endRound' }, { type: 'endRound' }]);
-        expect(idle.state().phase).toBe('lost');
+        playTimeline(idle, [], { untilSec: idle.state().level.goals[0].deadlineSec });
+        expect(idle.state().goals[0].missed).toBe(true);
       }
     }, 60000);
   }

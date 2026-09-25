@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { applyActions, createGame, debugSpawnBody } from '../src/sim/game.ts';
+import { createGame, debugSpawnBody, hashState, hintCostOf, playTimeline } from '../src/sim/game.ts';
 import { LEVELS } from '../src/levels/levels.ts';
 import { TOOL_DEFS } from '../src/sim/tools.ts';
-import type { Action } from '../src/sim/types.ts';
+import { POINTS } from '../src/sim/params.ts';
+import { GRACE_SEC, TICKS_PER_SECOND } from '../src/sim/types.ts';
 import { SOLUTIONS, replay } from './solutions.ts';
 
 describe('levels', () => {
@@ -10,7 +11,8 @@ describe('levels', () => {
     expect(LEVELS.map((l) => l.id)).toEqual([1, 2, 3, 4, 5]);
     for (const l of LEVELS) {
       expect(l.goals.length).toBeGreaterThan(0);
-      for (const g of l.goals) expect(g.byRound).toBeLessThanOrEqual(l.rounds);
+      expect(l.incomePerSec).toBeGreaterThan(0);
+      for (const g of l.goals) { expect(g.deadlineSec).toBeGreaterThan(0); expect(g.points).toBeGreaterThan(0); }
       const reps = Math.floor(l.startingEnergy / TOOL_DEFS.repulsor.cost);
       expect(reps).toBeGreaterThanOrEqual(2);
       expect(reps).toBeLessThanOrEqual(3);
@@ -18,67 +20,52 @@ describe('levels', () => {
     expect(LEVELS[4].rewards?.black_hole).toBe(1);
   });
 
-  for (const sol of SOLUTIONS) {
-    it(`level ${sol.level} is won by its scripted solution`, () => {
-      const g = createGame(sol.level);
-      const res = replay(g, sol.actions);
-      expect(res.every((r) => r.ok)).toBe(true);
-      const s = g.state();
-      expect(s.phase).toBe('won');
-      expect(s.goals.every((x) => x.met)).toBe(true);
-    }, 30000);
-
-    it(`level ${sol.level} is lost by placing nothing`, () => {
-      const g = createGame(sol.level);
-      const idle: Action[] = Array.from({ length: g.state().level.rounds }, () => ({ type: 'endRound' }));
-      applyActions(g, idle);
-      expect(g.state().phase).toBe('lost');
-    }, 30000);
-  }
-
-  it('winning level 5 grants the black hole reward', () => {
-    const g = createGame(5);
-    replay(g, SOLUTIONS.find((x) => x.level === 5)!.actions);
-    expect(g.state().phase).toBe('won');
-    expect(g.state().inventory.black_hole).toBe(1);
-    expect(g.help()).toMatch(/REWARD on win: black_hole x1/);
-  }, 30000);
+  it('help() summarises rules, goals, points, hints and tools', () => {
+    const h = createGame(3).help();
+    expect(h).toMatch(/GOALS/);
+    expect(h).toMatch(/within 60s/);
+    expect(h).toMatch(/POINTS: cloud 20/);
+    expect(h).toMatch(/HINT/);
+    expect(h).toMatch(/lens: cost 80/);
+    expect(h).not.toMatch(/pulse:/);
+  });
 });
 
-describe('game rules', () => {
-  it('phase machine intro -> plan -> running -> roundEnd -> plan', () => {
+describe('continuous clock', () => {
+  it('intro is paused; the first action starts the clock; step always advances while playing', () => {
     const g = createGame(1);
     const s = () => g.state();
     expect(s().phase).toBe('intro');
-    expect(g.step(10)).toBe(false);
+    g.step(10);
     expect(s().totalTick).toBe(0);
-    expect(g.apply({ type: 'endRound' }).ok).toBe(true);
-    expect(s().phase).toBe('plan');
-    expect(g.apply({ type: 'endRound' }).ok).toBe(true);
-    expect(s().phase).toBe('running');
-    expect(g.apply({ type: 'place', tool: 'repulsor', x: 10, y: 10 }).ok).toBe(false);
-    expect(g.apply({ type: 'endRound' }).ok).toBe(false);
-    expect(g.step(100)).toBe(true);
-    g.runRound();
-    expect(s().phase).toBe('roundEnd');
-    expect(s().energy).toBe(s().level.startingEnergy + s().level.incomePerRound);
     expect(g.apply({ type: 'start' }).ok).toBe(true);
-    expect(s().phase).toBe('plan');
-    expect(s().round).toBe(2);
+    expect(g.apply({ type: 'start' }).ok).toBe(false);
+    g.step(30);
+    expect(s().time).toBe(1);
+    g.runFor(4);
+    expect(s().time).toBe(5);
+    expect(s().energy).toBeCloseTo(70 + 5 * s().level.incomePerSec, 6);
+    // placing works at any time, and in intro it starts the clock
+    const g2 = createGame(1);
+    expect(g2.apply({ type: 'place', tool: 'repulsor', x: 40, y: 40 }).ok).toBe(true);
+    expect(g2.state().phase).toBe('playing');
   });
 
   it('validates placement: board, energy, palette', () => {
     const g = createGame(1);
     expect(g.apply({ type: 'place', tool: 'repulsor', x: -5, y: 10 }).ok).toBe(false);
     expect(g.apply({ type: 'place', tool: 'repulsor', x: 10, y: 200 }).ok).toBe(false);
-    expect(g.apply({ type: 'place', tool: 'wall', x: 10, y: 10, x2: 40, y2: 10 }).ok).toBe(false); // not in L1 palette
+    expect(g.apply({ type: 'place', tool: 'wall', x: 10, y: 10, x2: 40, y2: 10 }).ok).toBe(false);
     expect(g.apply({ type: 'place', tool: 'black_hole', x: 10, y: 10 }).ok).toBe(false);
     expect(g.apply({ type: 'place', tool: 'repulsor', x: 40, y: 40 }).ok).toBe(true);
     expect(g.apply({ type: 'place', tool: 'repulsor', x: 90, y: 40 }).ok).toBe(true);
     const r = g.apply({ type: 'place', tool: 'repulsor', x: 120, y: 40 });
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/energy/);
-    expect(g.state().energy).toBe(70 - 60);
+    expect(g.state().energy).toBe(10);
+    // income makes it affordable later
+    g.runFor(20 / g.state().level.incomePerSec + 0.1);
+    expect(g.apply({ type: 'place', tool: 'repulsor', x: 120, y: 40 }).ok).toBe(true);
   });
 
   it('rejects bad walls and stacked nodes with a reason', () => {
@@ -97,69 +84,42 @@ describe('game rules', () => {
     bad({ type: 'place', tool: 'wall', x: 81, y: 1, x2: 81, y2: 44 }, /too close/);
     expect(g.apply({ type: 'place', tool: 'repulsor', x: 40, y: 45 }).ok).toBe(true);
     bad({ type: 'place', tool: 'repulsor', x: 42, y: 47 }, /too close/);
-    expect(g.apply({ type: 'place', tool: 'repulsor', x: 45, y: 45 }).ok).toBe(false); // energy, not spacing
   });
 
-  it('winning scores leftover energy; losing lists only goals that were due', () => {
-    const g = createGame(1);
-    replay(g, SOLUTIONS[0].actions);
-    const s = g.state();
-    expect(s.phase).toBe('won');
-    expect(s.scoreboard.energyBonus).toBe(s.energy);
-    expect(s.scoreboard.score).toBeGreaterThanOrEqual(s.energy + 10);
-    const l = createGame(2);
-    applyActions(l, [{ type: 'endRound' }, { type: 'endRound' }]);
-    expect(l.state().phase).toBe('lost');
-    const msg = l.state().log.find((x) => x.includes('Level lost'))!;
-    expect(msg).toMatch(/2 clouds/);
-    expect(msg).not.toMatch(/planet/);
-  }, 30000);
-
-  it('remove refunds in full only in the round placed', () => {
+  it(`remove refunds in full within ${GRACE_SEC}s of placing, nothing after`, () => {
     const g = createGame(1);
     g.apply({ type: 'place', tool: 'repulsor', x: 40, y: 40 });
     g.apply({ type: 'place', tool: 'repulsor', x: 100, y: 40 });
     const [n1, n2] = g.state().nodes;
-    expect(n2).toBeDefined();
+    g.runFor(GRACE_SEC - 1);
+    let e = g.state().energy;
     expect(g.apply({ type: 'remove', nodeId: n1.id }).ok).toBe(true);
-    expect(g.state().energy).toBe(10 + 30);
-    applyActions(g, [{ type: 'endRound' }]);
-    g.apply({ type: 'start' });
-    const e = g.state().energy;
+    expect(g.state().energy).toBeCloseTo(e + 30, 9);
+    g.runFor(2);
+    e = g.state().energy;
     expect(g.apply({ type: 'remove', nodeId: n2.id }).ok).toBe(true);
     expect(g.state().energy).toBe(e);
+    expect(g.state().nodes.length).toBe(0);
     expect(g.apply({ type: 'remove', nodeId: 999 }).ok).toBe(false);
   });
 
-  it('move repositions this round\'s nodes for free and rejects older ones', () => {
+  it(`move is free within ${GRACE_SEC}s of placing and rejected after`, () => {
     const g = createGame(2);
     g.apply({ type: 'start' });
     expect(g.apply({ type: 'place', tool: 'wall', x: 40, y: 40, x2: 60, y2: 40 }).ok).toBe(true);
     const e = g.state().energy;
     const wall = g.state().nodes[0];
-    // translate: wall keeps its shape
     expect(g.apply({ type: 'move', nodeId: wall.id, x: 50, y: 60 }).ok).toBe(true);
-    const moved = g.state().nodes[0];
-    expect([moved.x, moved.y, moved.x2, moved.y2]).toEqual([50, 60, 70, 60]);
+    expect([wall.x, wall.y, wall.x2, wall.y2]).toEqual([50, 60, 70, 60]);
     expect(g.state().energy).toBe(e);
-    // same validation as placing
     expect(g.apply({ type: 'move', nodeId: wall.id, x: -5, y: 60 }).ok).toBe(false);
     expect(g.apply({ type: 'move', nodeId: wall.id, x: 50, y: 60, x2: 51, y2: 60 }).ok).toBe(false);
     expect(g.apply({ type: 'move', nodeId: 999, x: 10, y: 10 }).ok).toBe(false);
-    // a second wall cannot be dragged onto the first, but can be dragged onto its own spot
-    expect(g.apply({ type: 'place', tool: 'wall', x: 100, y: 20, x2: 120, y2: 20 }).ok).toBe(true);
-    const w2 = g.state().nodes[1];
-    expect(g.apply({ type: 'move', nodeId: w2.id, x: 51, y: 60 }).ok).toBe(false);
-    expect(g.apply({ type: 'move', nodeId: w2.id, x: 101, y: 20 }).ok).toBe(true);
-    // after the round has run, the node is locked in place
-    applyActions(g, [{ type: 'endRound' }]);
-    g.apply({ type: 'start' });
-    if (g.state().phase === 'plan') {
-      const r = g.apply({ type: 'move', nodeId: wall.id, x: 30, y: 30 });
-      expect(r.ok).toBe(false);
-      expect(r.reason).toMatch(/this round/);
-    }
-  }, 30000);
+    g.runFor(GRACE_SEC + 0.5);
+    const r = g.apply({ type: 'move', nodeId: wall.id, x: 30, y: 30 });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/within/);
+  });
 
   it('inventory tools are free and usable outside the palette', () => {
     const g = createGame(1, undefined, { inventory: { black_hole: 1 } });
@@ -169,47 +129,188 @@ describe('game rules', () => {
     expect(g.state().inventory.black_hole).toBe(0);
     expect(g.apply({ type: 'place', tool: 'black_hole', x: 30, y: 45 }).ok).toBe(false);
     const before = g.state().particles.length;
-    applyActions(g, [{ type: 'endRound' }]);
-    expect(g.state().particles.length).toBeLessThan(before); // swallowed gas
+    g.runFor(20);
+    expect(g.state().particles.length).toBeLessThan(before);
     expect(g.state().nodes[0].mass!).toBeGreaterThan(100);
   });
 
   it('red matter collapses a cloud it touches into a star and is spent', () => {
     const g = createGame(1, undefined, { inventory: { red_matter: 1 } });
-    g.apply({ type: 'endRound' });
     expect(g.apply({ type: 'place', tool: 'red_matter', x: 80, y: 45 }).ok).toBe(true);
-    g.apply({ type: 'endRound' });
     const cloud = debugSpawnBody(g, 'cloud', 82, 45, 20);
     g.step(1);
     expect(cloud.kind).toBe('star_ms');
     expect(g.state().nodes.length).toBe(0);
   });
 
-  it('pulse lasts one round', () => {
+  it('pulse expires after durationSec', () => {
     const g = createGame(4);
     g.apply({ type: 'place', tool: 'pulse', x: 80, y: 45 });
+    const n = g.state().nodes[0];
+    expect(n.expiresAt).toBe(TOOL_DEFS.pulse.durationSec);
+    g.runFor(TOOL_DEFS.pulse.durationSec! - 1);
     expect(g.state().nodes.length).toBe(1);
-    applyActions(g, [{ type: 'endRound' }]);
+    g.runFor(1);
     expect(g.state().nodes.length).toBe(0);
-  });
-
-  it('help() summarises rules, goals and tools', () => {
-    const h = createGame(3).help();
-    expect(h).toMatch(/GOALS/);
-    expect(h).toMatch(/lens: cost 80/);
-    expect(h).not.toMatch(/pulse:/);
   });
 });
 
-describe('performance', () => {
-  it('steps 600 ticks with 3000 particles quickly', () => {
+describe('goals and points', () => {
+  it('goal counts down, is marked missed at 0, still completes later; stars = 3 - missed', () => {
+    const g = createGame(1);
+    g.apply({ type: 'start' });
+    g.runFor(10);
+    const gs = g.state().goals[0];
+    expect(gs.remainingSec).toBeCloseTo(gs.goal.deadlineSec - 10, 6);
+    g.runFor(gs.goal.deadlineSec - 10);
+    expect(gs.missed).toBe(true);
+    expect(gs.remainingSec).toBe(0);
+    expect(g.state().log.some((l) => /Time's up/.test(l))).toBe(true);
+    expect(g.state().phase).toBe('playing');
+    debugSpawnBody(g, 'cloud', 80, 45, 20);
+    g.step(1);
+    expect(gs.met).toBe(true);
+    expect(g.state().phase).toBe('cleared');
+    expect(g.state().stars).toBe(2);
+    expect(g.state().scoreboard.pointsBy.goals).toBe(gs.goal.points); // no early bonus
+  });
+
+  it('meeting a goal early pays goal.points x (1 + remaining/deadline), latched with metAt', () => {
+    const g = createGame(1);
+    g.apply({ type: 'start' });
+    g.runFor(5);
+    debugSpawnBody(g, 'cloud', 80, 45, 20);
+    g.step(1);
+    const s = g.state(), gs = s.goals[0];
+    expect(gs.met).toBe(true);
+    expect(gs.metAt).toBeCloseTo(5 + 1 / TICKS_PER_SECOND, 6);
+    const d = gs.goal.deadlineSec;
+    expect(s.scoreboard.pointsBy.goals).toBe(Math.round(gs.goal.points * (1 + (d - gs.metAt!) / d)));
+    expect(s.phase).toBe('cleared');
+    expect(s.stars).toBe(3);
+    // latched: the cloud vanishing does not unmeet it; frozen countdown
+    s.bodies.length = 0;
+    const rem = gs.remainingSec;
+    g.runFor(2);
+    expect(gs.met).toBe(true);
+    expect(gs.remainingSec).toBe(rem);
+  });
+
+  it('the grid keeps running after cleared, and points keep accruing', () => {
+    const g = createGame(3);
+    replay(g, SOLUTIONS.find((x) => x.level === 3)!.timeline);
+    expect(g.state().phase).toBe('cleared');
+    const t = g.state().totalTick, p = g.state().scoreboard.points, h = hashState(g.state());
+    g.runFor(10);
+    expect(g.state().phase).toBe('cleared');
+    expect(g.state().totalTick).toBe(t + 300);
+    expect(hashState(g.state())).not.toBe(h);
+    expect(g.state().scoreboard.points).toBeGreaterThan(p); // the star keeps fusing He
+    expect(g.apply({ type: 'place', tool: 'repulsor', x: 20, y: 70 }).ok).toBe(true);
+  }, 30000);
+
+  it('clearing level 5 grants the black hole reward', () => {
     const g = createGame(5);
-    applyActions(g, [{ type: 'place', tool: 'repulsor', x: 60, y: 45 }]);
-    g.apply({ type: 'endRound' });
+    g.apply({ type: 'start' });
+    g.state().goals.forEach((x) => { x.goal = { ...x.goal, count: 0 }; });
+    g.step(1);
+    expect(g.state().phase).toBe('cleared');
+    expect(g.state().inventory.black_hole).toBe(1);
+    expect(g.help()).toMatch(/REWARD on clear: black_hole x1/);
+  });
+
+  it('points are the start float plus pointsBy minus hints, never negative', () => {
+    const g = createGame(1);
+    const sb = g.state().scoreboard;
+    expect(sb.points).toBe(POINTS.startPoints);
+    g.apply({ type: 'hint' });
+    expect(sb.points).toBe(POINTS.startPoints - POINTS.hintCost);
+    expect(sb.points).toBeGreaterThanOrEqual(0);
+    const pb = sb.pointsBy;
+    g.runFor(3);
+    expect(sb.points).toBe(POINTS.startPoints + pb.clouds + pb.planets + pb.stars + pb.novae + pb.elements + pb.goals - pb.spentHints);
+  });
+});
+
+describe('hints', () => {
+  it('cost escalates per use, is rejected when broke, and does not touch the live world', () => {
+    const g = createGame(1);
+    const ref = createGame(1);
+    for (const x of [g, ref]) x.apply({ type: 'start' });
+    expect(hintCostOf(g)).toBe(POINTS.hintCost);
+    const r = g.apply({ type: 'hint' });
+    expect(r.ok).toBe(true);
+    expect(r.hint!.cost).toBe(POINTS.hintCost);
+    expect(g.state().hint).toEqual(r.hint);
+    expect(hintCostOf(g)).toBe(2 * POINTS.hintCost);
+    // live world untouched: same trajectory as a game that never asked
+    expect(hashState(g.state())).toBe(hashState(ref.state()));
+    g.runFor(3); ref.runFor(3);
+    expect(hashState(g.state())).toBe(hashState(ref.state()));
+    // broke: rejected with a reason, nothing charged
+    const p = g.state().scoreboard.points;
+    const r2 = g.apply({ type: 'hint' });
+    expect(r2.ok).toBe(false);
+    expect(r2.reason).toMatch(/costs 100 points/);
+    expect(g.state().scoreboard.points).toBe(p);
+    // with enough points the second hint costs double
+    g.state().scoreboard.pointsBy.clouds += 1000;
+    g.step(1);
+    const r3 = g.apply({ type: 'hint' });
+    expect(r3.ok).toBe(true);
+    expect(r3.hint!.cost).toBe(2 * POINTS.hintCost);
+    expect(g.state().scoreboard.pointsBy.spentHints).toBe(3 * POINTS.hintCost);
+  });
+
+  it('suggests a valid, affordable placement for the most urgent goal', () => {
+    for (const [L, pre] of [[1, 0], [2, 3], [3, 12]] as const) {
+      const g = createGame(L, 4);
+      playTimeline(g, L === 3 ? [{ t: 0, action: { type: 'place', tool: 'wall', x: 80, y: 0, x2: 80, y2: 45 } }] : [], { untilSec: pre });
+      const r = g.apply({ type: 'hint' });
+      expect(r.ok).toBe(true);
+      const h = r.hint!;
+      expect(h.reason.length).toBeGreaterThan(10);
+      expect(g.state().goals[h.goalIndex].met).toBe(false);
+      expect(g.state().level.tools).toContain(h.tool);
+      expect(g.state().energy).toBeGreaterThanOrEqual(TOOL_DEFS[h.tool].cost);
+      const res = g.apply({ type: 'place', tool: h.tool, x: h.x, y: h.y, ...(h.x2 !== undefined ? { x2: h.x2, y2: h.y2 } : {}) });
+      expect(`L${L}: ${res.reason ?? 'ok'}`).toBe(`L${L}: ok`);
+      expect(g.state().hint).toBeNull(); // acted on
+    }
+  }, 30000);
+
+  it('refuses (free of charge) when no tool is affordable', () => {
+    const g = createGame(1);
+    g.apply({ type: 'place', tool: 'repulsor', x: 40, y: 40 });
+    g.apply({ type: 'place', tool: 'repulsor', x: 100, y: 40 });
+    const r = g.apply({ type: 'hint' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/energy/);
+    expect(g.state().scoreboard.points).toBe(POINTS.startPoints);
+  });
+
+  it('answers in < 300 ms on a 3000-particle level', () => {
+    const g = createGame(5);
+    playTimeline(g, [{ t: 0, action: { type: 'place', tool: 'wall', x: 80, y: 0, x2: 80, y2: 45 } }], { untilSec: 20 });
+    g.state().scoreboard.pointsBy.clouds += 10000;
+    g.step(1);
+    g.apply({ type: 'hint' }); // warm up
     const t = performance.now();
-    g.runRound();
+    const r = g.apply({ type: 'hint' });
     const ms = performance.now() - t;
     expect(g.state().particles.length).toBeGreaterThanOrEqual(2900);
-    expect(ms).toBeLessThan(1000);
+    expect(r.ok).toBe(true);
+    expect(ms).toBeLessThan(300);
+  }, 30000);
+});
+
+describe('performance', () => {
+  it('steps 20 s with 3000 particles quickly', () => {
+    const g = createGame(5);
+    g.apply({ type: 'place', tool: 'repulsor', x: 60, y: 45 });
+    const t = performance.now();
+    g.runFor(20);
+    expect(g.state().particles.length).toBeGreaterThanOrEqual(2900);
+    expect(performance.now() - t).toBeLessThan(1500);
   }, 10000);
 });

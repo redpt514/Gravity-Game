@@ -1,18 +1,20 @@
 /**
- * Headless CLI.
- *   npm run play -- --level N [--seed S] [--aspect A] [--auto] [--ascii]
- * Levels 1-3 are handcrafted; N >= 4 is generated for the board (takes a few seconds, see src/levels/procgen.ts).
- * --solution replays a procedural level's calibration line (level.solution).
+ * Headless CLI (continuous play).
+ *   npm run play -- --level N [--seed S] [--aspect A] [--auto] [--solution] [--ascii]
+ * Levels 1-3 are handcrafted; N >= 4 is generated for the board (a few seconds, see src/levels/procgen.ts).
+ * --solution replays the level's reference timeline (procedural: level.solution; 1-3: tests/solutions.ts).
+ * --auto plays with the calibration bot's heuristics (acting every few seconds) until cleared or every deadline passed.
  * --aspect A (board width/height, e.g. 0.6 for a phone in portrait) sizes the board like the UI does; default 160x90.
- * REPL mode: one JSON per stdin line: an Action, {"type":"state"[,"full":true]}, {"type":"help"}, {"type":"ascii"}.
- * Prints one compact JSON line per input. Intro/round-end cards are auto-dismissed, so you are always in
- * plan phase until the level is won/lost; {"type":"endRound"} runs the whole round.
+ * REPL mode: one JSON per stdin line: an Action ({"type":"place",...}, {"type":"hint"}, ...),
+ *   {"type":"advance","seconds":N} (run the clock), {"type":"state"[,"full":true]}, {"type":"help"}, {"type":"ascii"}.
+ * The clock starts on the first action (the intro card is dismissed). Prints one compact JSON line per input.
  */
-import { createGame, helpText } from '../src/sim/game.ts';
+import { createGame, helpText, hintCostOf, playTimeline } from '../src/sim/game.ts';
 import { getLevelDef, HANDCRAFTED_COUNT } from '../src/levels/catalog.ts';
 import { DEFAULT_WORLD, worldSizeForAspect } from '../src/sim/worldSize.ts';
 import { canCondenseAt } from '../src/sim/bodies.ts';
-import type { Action, BodyKind, Game, GameState, ToolId } from '../src/sim/types.ts';
+import { runBot } from '../src/levels/bot.ts';
+import type { Action, BodyKind, Game, GameState, TimedAction, ToolId } from '../src/sim/types.ts';
 import { TOOL_DEFS } from '../src/sim/tools.ts';
 import * as readline from 'node:readline';
 
@@ -31,7 +33,6 @@ const makeGame = (): Game => createGame(levelId, seed, {
 
 const r1 = (v: number) => Math.round(v * 10) / 10;
 
-/** Smoothed free-gas density per cell, as the sim sees it. */
 function density(s: GameState): Float32Array {
   return s.density ?? new Float32Array(s.gridW * s.gridH);
 }
@@ -50,6 +51,13 @@ function topCells(s: GameState, n: number): { x: number; y: number; d: number }[
   return out;
 }
 
+function goalsSummary(s: GameState) {
+  return s.goals.map((x) => ({
+    label: x.goal.label, current: x.current, need: x.goal.count, remainingSec: r1(x.remainingSec), deadlineSec: x.goal.deadlineSec,
+    met: x.met, ...(x.metAt !== undefined ? { metAt: r1(x.metAt) } : {}), missed: x.missed, points: x.goal.points,
+  }));
+}
+
 function summary(g: Game, full = false): Record<string, unknown> {
   const s = g.state();
   const bodies: Partial<Record<BodyKind, unknown[]>> = {};
@@ -59,16 +67,21 @@ function summary(g: Game, full = false): Record<string, unknown> {
   const els: Record<string, number> = {};
   for (const [k, v] of Object.entries(s.scoreboard.elements)) if (v > 0) els[k] = Math.floor(v);
   const out: Record<string, unknown> = {
-    level: s.levelId, name: s.level.name, phase: s.phase, round: s.round, rounds: s.level.rounds, tick: s.tick,
-    energy: s.energy, inventory: s.inventory,
+    level: s.levelId, name: s.level.name, phase: s.phase, time: r1(s.time), stars: s.stars,
+    energy: Math.floor(s.energy), incomePerSec: s.level.incomePerSec, inventory: s.inventory,
     tools: s.level.tools.map((t: ToolId) => `${t}:${TOOL_DEFS[t].cost}`),
-    goals: s.goals.map((x) => ({ label: x.goal.label, byRound: x.goal.byRound, current: x.current, need: x.goal.count, met: x.met })),
+    goals: goalsSummary(s),
+    points: s.scoreboard.points, pointsBy: s.scoreboard.pointsBy, nextHintCost: hintCostOf(g),
+    hint: s.hint,
     bodies,
-    nodes: s.nodes.map((n) => ({ id: n.id, tool: n.tool, x: r1(n.x), y: r1(n.y), ...(n.x2 !== undefined ? { x2: r1(n.x2), y2: r1(n.y2 ?? 0) } : {}), ...(n.roundsLeft !== null ? { roundsLeft: n.roundsLeft } : {}) })),
+    nodes: s.nodes.map((n) => ({
+      id: n.id, tool: n.tool, x: r1(n.x), y: r1(n.y), ...(n.x2 !== undefined ? { x2: r1(n.x2), y2: r1(n.y2 ?? 0) } : {}),
+      placedAt: r1(n.placedAt), ...(n.expiresAt !== null ? { expiresAt: r1(n.expiresAt) } : {}),
+    })),
     freeParticles: s.particles.filter((p) => p.bodyId === 0).length,
     cloudThreshold: Math.round((s.cloudThreshold ?? 0) * 100) / 100,
     densest: topCells(s, 5),
-    scoreboard: { clouds: s.scoreboard.cloudsFormed, novae: s.scoreboard.novae, elements: els, score: s.scoreboard.score },
+    scoreboard: { clouds: s.scoreboard.cloudsFormed, novae: s.scoreboard.novae, elements: els },
     log: s.log.slice(-6),
   };
   if (full) out.particles = s.particles.map((p) => [r1(p.x), r1(p.y), p.el, p.bodyId]);
@@ -86,7 +99,6 @@ export function asciiMap(s: GameState): string {
     for (let i = 0; i < gw; i++) {
       const v = d[j * gw + i];
       let c = Math.min(DCH.length - 1, Math.floor((v / thr) * (DCH.length - 1)));
-      // '@' only where a cloud can actually condense (dense enough, not next to a body, not inside a lens)
       if (c === DCH.length - 1 && !canCondenseAt(s, (i + 0.5) * cell, (j + 0.5) * cell)) c--;
       row.push(DCH[c]);
     }
@@ -102,91 +114,66 @@ export function asciiMap(s: GameState): string {
       for (let k = 0; k <= steps; k++) put(n.x + ((n.x2 - n.x) * k) / steps, n.y + ((n.y2 - n.y) * k) / steps, '|');
     } else put(n.x, n.y, ({ repulsor: 'R', lens: 'L', pulse: 'P', black_hole: 'X', red_matter: 'M', wall: '|' } as Record<ToolId, string>)[n.tool]);
   }
+  if (s.hint) put(s.hint.x, s.hint.y, '?');
   const bc: Record<BodyKind, string> = { cloud: 'c', planet: 'p', star_ms: 'S', star_giant: 'G', white_dwarf: 'W', neutron: 'N', black_hole: 'B' };
   for (const b of s.bodies) put(b.x, b.y, bc[b.kind]);
   const border = '+' + '-'.repeat(gw) + '+';
   return [border, ...rows.map((r) => '|' + r.join('') + '|'), border,
-    `R${s.round} ${s.phase} density: ' '..'%' = 0..${DCH.length - 2}/${DCH.length - 1} of cloud threshold ${thr.toFixed(2)}, '@' = a cloud can condense here ('%' = dense but blocked by a body/lens) | R repulsor | wall L lens P pulse X blackhole M redmatter | c cloud p planet S star G giant W dwarf N neutron B hole`].join('\n');
+    `t=${s.time.toFixed(1)}s ${s.phase} density: ' '..'%' = 0..${DCH.length - 2}/${DCH.length - 1} of cloud threshold ${thr.toFixed(2)}, '@' = a cloud can condense here ('%' = dense but blocked by a body/lens) | R repulsor | wall L lens P pulse X blackhole M redmatter ? hint | c cloud p planet S star G giant W dwarf N neutron B hole`].join('\n');
 }
 
-/** Dismiss intro/roundEnd cards so the player is in plan phase. */
-function dismiss(g: Game): void {
-  const ph = g.state().phase;
-  if (ph === 'intro' || ph === 'roundEnd') g.apply({ type: 'start' });
+const lastDeadline = (s: GameState) => Math.max(0, ...s.level.goals.map((g) => g.deadlineSec));
+
+/** Handcrafted reference timelines live in tests/solutions.ts (loaded lazily so the CLI works without tests). */
+async function referenceTimeline(s: GameState): Promise<TimedAction[]> {
+  if (s.level.solution) return s.level.solution;
+  const { SOLUTIONS } = await import('../tests/solutions.ts');
+  return SOLUTIONS.find((x) => x.level === levelId)?.timeline ?? [];
 }
 
-function runAction(g: Game, a: Action): { ok: boolean; reason?: string } {
-  dismiss(g);
-  const r = g.apply(a);
-  if (r.ok && a.type === 'endRound') {
-    g.runRound();
-    if (ascii) process.stderr.write(asciiMap(g.state()) + '\n');
-    dismiss(g);
-  }
-  if (r.ok && a.type === 'restart') dismiss(g);
-  return r;
-}
-
-// ---------------- auto bot ----------------
-function autoPlay(g: Game): boolean {
+function result(g: Game): Record<string, unknown> {
   const s = g.state();
-  dismiss(g);
-  const R = TOOL_DEFS.repulsor.radius;
-  let turn = 0;
-  while (s.phase === 'plan') {
-    // target: biggest body, else densest cell
-    let tx: number, ty: number;
-    const big = [...s.bodies].sort((a, b) => b.mass - a.mass)[0];
-    if (big) { tx = big.x; ty = big.y; } else { const t = topCells(s, 1)[0]; tx = t.x; ty = t.y; }
-    tx = Math.min(s.width - 25, Math.max(25, tx));
-    ty = Math.min(s.height - 20, Math.max(20, ty));
-    const cost = TOOL_DEFS.repulsor.cost;
-    let k = 0;
-    while (s.energy >= cost && k < 6) {
-      const ang = (turn * 0.5 + k * (2 * Math.PI / 3)) + (k >= 3 ? Math.PI / 3 : 0);
-      const dist = R * 1.25;
-      const x = Math.min(s.width - 1, Math.max(1, tx + Math.cos(ang) * dist));
-      const y = Math.min(s.height - 1, Math.max(1, ty + Math.sin(ang) * dist));
-      const clash = s.nodes.some((n) => Math.hypot(n.x - x, n.y - y) < R * 0.6);
-      if (!clash) { const r = g.apply({ type: 'place', tool: 'repulsor', x, y }); if (!r.ok) break; }
-      k++;
-    }
-    turn++;
-    runAction(g, { type: 'endRound' });
-    process.stdout.write(JSON.stringify({ round: s.phase === 'plan' ? s.round - 1 : s.round, phase: s.phase, goals: summary(g).goals, bodies: summary(g).bodies }) + '\n');
-  }
-  return s.phase === 'won';
+  return { result: s.phase, level: levelId, time: r1(s.time), stars: s.stars, points: s.scoreboard.points, pointsBy: s.scoreboard.pointsBy, goals: goalsSummary(s), log: s.log.slice(-4) };
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const g = makeGame();
-  if (flag('--solution')) {
-    // replay the calibration bot's line of a procedural level
-    for (const a of g.state().level.solution ?? []) { if (g.state().phase === 'won' || g.state().phase === 'lost') break; runAction(g, a); }
-    const s = g.state();
-    process.stdout.write(JSON.stringify({ result: s.phase, level: levelId, round: s.round, goals: summary(g).goals }) + '\n');
-    process.exit(s.phase === 'won' ? 0 : 1);
+  if (flag('--solution') || flag('--auto')) {
+    let timeline: TimedAction[];
+    if (flag('--solution')) timeline = await referenceTimeline(g.state());
+    else {
+      // the calibration bot plays a copy of the level; its timeline is replayed on the real game
+      const s = g.state();
+      timeline = runBot(s.level, { width: s.width, height: s.height, gridW: s.gridW, gridH: s.gridH }, { horizonSec: lastDeadline(s) }).timeline;
+    }
+    playTimeline(g, timeline, { untilSec: lastDeadline(g.state()), stopWhenCleared: true });
+    if (ascii) process.stderr.write(asciiMap(g.state()) + '\n');
+    process.stdout.write(JSON.stringify({ ...result(g), timeline }) + '\n');
+    process.exit(g.state().phase === 'cleared' ? 0 : 1);
   }
-  if (flag('--auto')) {
-    const won = autoPlay(g);
-    const s = g.state();
-    process.stdout.write(JSON.stringify({ result: s.phase, level: levelId, round: s.round, energy: s.energy, score: s.scoreboard.score, log: s.log.slice(-4) }) + '\n');
-    process.exit(won ? 0 : 1);
-  }
-  dismiss(g);
+  g.apply({ type: 'start' });
   process.stdout.write(JSON.stringify({ help: helpText(g.state()), state: summary(g) }) + '\n');
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
   rl.on('line', (line) => {
     const t = line.trim();
     if (!t) return;
-    let msg: { type: string; full?: boolean };
+    let msg: { type: string; full?: boolean; seconds?: number };
     try { msg = JSON.parse(t); } catch { process.stdout.write(JSON.stringify({ ok: false, reason: 'bad JSON' }) + '\n'); return; }
     if (msg.type === 'help') { process.stdout.write(JSON.stringify({ help: g.help() }) + '\n'); return; }
     if (msg.type === 'state') { process.stdout.write(JSON.stringify(summary(g, !!msg.full)) + '\n'); return; }
     if (msg.type === 'ascii') { process.stdout.write(JSON.stringify({ ascii: asciiMap(g.state()) }) + '\n'); return; }
-    const r = runAction(g, msg as Action);
+    if (msg.type === 'advance') {
+      const sec = Number(msg.seconds ?? 1);
+      if (!Number.isFinite(sec) || sec < 0 || sec > 600) { process.stdout.write(JSON.stringify({ ok: false, reason: 'seconds must be 0..600' }) + '\n'); return; }
+      g.runFor(sec);
+      if (ascii) process.stderr.write(asciiMap(g.state()) + '\n');
+      process.stdout.write(JSON.stringify({ ok: true, state: summary(g) }) + '\n');
+      return;
+    }
+    const r = g.apply(msg as Action);
+    if (r.ok && msg.type === 'restart') g.apply({ type: 'start' });
     process.stdout.write(JSON.stringify({ ...r, state: summary(g) }) + '\n');
   });
 }
 
-if (process.argv[1]?.endsWith("play.ts")) main();
+if (process.argv[1]?.endsWith('play.ts')) void main();

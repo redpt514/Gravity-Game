@@ -62,7 +62,7 @@ function toolsFor(n: number): { tools: ToolId[]; rewards?: Partial<Record<ToolId
 
 /** Seconds the calibration bot plays level n (goal deadlines fall inside this). */
 export function horizonFor(n: number): number {
-  return Math.min(120, 80 + 10 * Math.floor((n - 4) / 2));
+  return Math.min(110, 80 + 10 * Math.floor((n - 4) / 2));
 }
 
 /** Physics of level n (goals are filled in by calibration). */
@@ -136,7 +136,7 @@ function deriveGoals(n: number, run: BotRun, frac: number, slack: number, pad: n
  * the run stops once idle has formed no body at all by IDLE_EMPTY_SEC while every goal due by then is
  * already missed: an empty board that late cannot reach any later goal before its deadline in practice.
  */
-const IDLE_EMPTY_SEC = 60;
+const IDLE_EMPTY_SEC = 45;
 function idleMissesAll(level: LevelDef, world: BoardSize, idle: { metrics: Metrics[]; emptyAt: number | null }): boolean {
   const last = Math.max(...level.goals.map((g) => g.deadlineSec));
   const need = idle.emptyAt !== null ? Math.min(last, idle.emptyAt) : last;
