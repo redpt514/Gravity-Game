@@ -89,7 +89,7 @@ const pinch = (side: Side): Item => ({
   tool: 'repulsor', minRound: 1,
   at: (c) => ({ u: c.f.L / 2, v: side === 'top' ? c.f.S / 4 : (3 * c.f.S) / 4 }),
 });
-/** Pulse just downstream-inside of the biggest body: shoves the surrounding gas into it for a round. */
+/** Pulse just downstream-inside of the biggest body: shoves the surrounding gas into it while it lasts. */
 const pulseFeed = (side: Side, minRound: number): Item => ({
   tool: 'pulse', minRound,
   at: (c) => {
