@@ -20,20 +20,26 @@ export function goalValue(s: GameState, g: Goal, maxDensity = 0): number {
   }
 }
 
-/** Refresh s.goals current/met. Met is latched: once achieved it stays achieved. */
-export function evaluateGoals(s: GameState, maxDensity = 0): void {
-  for (const gs of s.goals) {
+export interface GoalChange { index: number; kind: 'met' | 'missed' }
+
+/**
+ * Refresh s.goals at the current game time: current values, countdowns, latching.
+ * A goal is met the first time current >= count (latched, metAt recorded, countdown frozen);
+ * an unmet goal whose countdown reaches 0 is marked missed but can still be met later.
+ */
+export function updateGoals(s: GameState, maxDensity = 0): GoalChange[] {
+  const out: GoalChange[] = [];
+  s.goals.forEach((gs, index) => {
     gs.current = goalValue(s, gs.goal, maxDensity);
-    if (gs.current >= gs.goal.count) gs.met = true;
-  }
-}
-
-export type Verdict = 'won' | 'lost' | 'continue';
-
-/** Called at the end of round `round` (after evaluateGoals). */
-export function judge(s: GameState, round: number): Verdict {
-  if (s.goals.some((g) => !g.met && g.goal.byRound <= round)) return 'lost';
-  if (s.goals.every((g) => g.met)) return 'won';
-  if (round >= s.level.rounds) return 'lost';
-  return 'continue';
+    if (gs.met) return;
+    gs.remainingSec = Math.max(0, gs.goal.deadlineSec - s.time);
+    if (gs.current >= gs.goal.count) {
+      gs.met = true; gs.metAt = s.time;
+      out.push({ index, kind: 'met' });
+    } else if (gs.remainingSec <= 0 && !gs.missed) {
+      gs.missed = true;
+      out.push({ index, kind: 'missed' });
+    }
+  });
+  return out;
 }

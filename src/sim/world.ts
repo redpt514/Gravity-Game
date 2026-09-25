@@ -30,6 +30,8 @@ export interface World {
   maxDensity: number;
   /** level mean density (particles per cell) at start; thresholds scale with it */
   meanDensity: number;
+  /** hints bought so far this level (cost escalates) */
+  hintsUsed: number;
 }
 
 const WORLDS = new WeakMap<GameState, World>();
@@ -54,6 +56,7 @@ export function makeWorld(s: GameState, rng: Rng): World {
     removedParticles: 0,
     maxDensity: 0,
     meanDensity: s.level.particleCount / n,
+    hintsUsed: 0,
   };
   WORLDS.set(s, w);
   return w;

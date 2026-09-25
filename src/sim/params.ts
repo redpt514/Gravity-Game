@@ -83,13 +83,30 @@ export const P = {
   nodeMinSpacing: 4,      // same-tool nodes (wall midpoints) must be at least this far apart
   blackHoleConsumeFrac: 0.3,
   blackHoleStartMass: 100,
-  // ---- scoring / bookkeeping ----
-  scoreCloud: 10,
-  scoreStar: 50,
-  scoreNova: 200,
-  scorePerElement: 1,
-  scorePerEnergy: 1,      // leftover dark energy at level win
+  // ---- bookkeeping ----
   logLines: 10,
-  goalEvalEvery: 10,
+  eventKeepSec: 5,        // state.events keeps the last few seconds
 };
 export type Params = typeof P;
+
+/**
+ * POINTS: earned live when things form (and per unit of element produced), plus goal bonuses; spent on hints.
+ * Every level starts with `startPoints` so the first hint is affordable before anything has formed.
+ */
+export const POINTS = {
+  cloud: 20,
+  planet: 40,
+  star_ms: 100,
+  star_giant: 150,
+  white_dwarf: 200,
+  neutron: 250,
+  black_hole: 400,
+  supernova: 500,
+  /** per unit produced by fusion / supernovae (H is never produced) */
+  element: { H: 0, He: 1, C: 2, O: 2, Fe: 5, heavy: 10 } as Record<'H' | 'He' | 'C' | 'O' | 'Fe' | 'heavy', number>,
+  /** goal met: goal.points x (1 + goalEarlyBonus x remainingSec / deadlineSec) */
+  goalEarlyBonus: 1,
+  /** hint k (0-based, per level) costs hintCost x (1 + k) */
+  hintCost: 50,
+  startPoints: 50,
+};

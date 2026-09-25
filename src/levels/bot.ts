@@ -7,18 +7,20 @@
  */
 import { createGame } from '../sim/game.ts';
 import { TOOL_DEFS } from '../sim/tools.ts';
-import type { Action, Game, GameState, Goal, LevelDef, ToolId } from '../sim/types.ts';
+import { Frame } from '../sim/frame.ts';
+import type { Action, Game, GameState, Goal, LevelDef, TimedAction, ToolId } from '../sim/types.ts';
+import { TICKS_PER_SECOND } from '../sim/types.ts';
 import { goalValue } from './goals.ts';
 
 export interface BoardSize { width: number; height: number; gridW: number; gridH: number }
 
-/** Tracked per round (latched max over the goal-evaluation samples up to the end of that round). */
+/** Tracked per second of game time (latched max over the samples up to then). */
 export const METRICS = ['clouds', 'planets', 'stars', 'giants', 'dwarfs', 'He', 'CO', 'Fe', 'novae'] as const;
 export type Metric = (typeof METRICS)[number];
 export type Metrics = Record<Metric, number>;
 
-/** The goal that `metric` measures (count and byRound are filled in by the caller). */
-export function metricGoal(m: Metric): Omit<Goal, 'count' | 'byRound' | 'label'> {
+/** The goal that `metric` measures (count, deadline and points are filled in by the caller). */
+export function metricGoal(m: Metric): Omit<Goal, 'count' | 'deadlineSec' | 'points' | 'label'> {
   switch (m) {
     case 'clouds': return { type: 'clouds' };
     case 'planets': return { type: 'planets' };
@@ -32,7 +34,7 @@ export function metricGoal(m: Metric): Omit<Goal, 'count' | 'byRound' | 'label'>
   }
 }
 
-const PROBES: { m: Metric; g: Goal }[] = METRICS.map((m) => ({ m, g: { ...metricGoal(m), count: 1, byRound: 1, label: m } as Goal }));
+const PROBES: { m: Metric; g: Goal }[] = METRICS.map((m) => ({ m, g: { ...metricGoal(m), count: 1, deadlineSec: 1, points: 0, label: m } as Goal }));
 
 function sampleMetrics(s: GameState, into: Metrics): void {
   for (const { m, g } of PROBES) {
@@ -41,29 +43,10 @@ function sampleMetrics(s: GameState, into: Metrics): void {
   }
 }
 
-/** Canonical frame <-> board. */
-export class Frame {
-  readonly L: number; readonly S: number;
-  private readonly tall: boolean; private readonly flip: boolean;
-  private readonly W: number; private readonly H: number;
-  constructor(W: number, H: number, swirl: number) {
-    this.W = W; this.H = H;
-    this.tall = H > W;
-    this.flip = swirl < 0;
-    this.L = this.tall ? H : W;
-    this.S = this.tall ? W : H;
-  }
-  toBoard(u: number, v: number): { x: number; y: number } {
-    const uu = this.flip ? this.L - u : u;
-    return this.tall ? { x: this.W - v, y: uu } : { x: uu, y: v };
-  }
-  toCanon(x: number, y: number): { u: number; v: number } {
-    const u = this.tall ? y : x, v = this.tall ? this.W - x : y;
-    return { u: this.flip ? this.L - u : u, v };
-  }
-}
+export { Frame };
 
 type Side = 'top' | 'bottom';
+/** minRound r = not before (r-1) x ROUND_SEC seconds (the old round structure, kept as the bot's pacing). */
 interface Item { tool: ToolId; minRound: number; at: (ctx: Ctx) => { u: number; v: number; u2?: number; v2?: number } | null }
 interface Ctx { s: GameState; f: Frame }
 
@@ -132,41 +115,45 @@ export const VARIANTS: Record<string, Item[]> = {
   pinch: [pinch('top'), pinch('bottom'), dam('top'), squeeze('top', 25, 15, 3), lens('top'), redMatter('top', 3), pulseFeed('top', 5), lens('bottom', 5)],
 };
 
+/** Seconds of game time per "round" of the bot's plan, and how often it gets to act. */
+export const ROUND_SEC = 20;
+export const ACT_SEC = 10;
+const MAX_PER_ACT = 3;
+
 export interface BotRun {
   variant: string;
-  /** replayable action list (tests/solutions.ts style: each endRound runs one round) */
-  actions: Action[];
-  /** metrics[r-1] = latched values by the end of round r */
+  /** replayable timed actions (t = game seconds) */
+  timeline: TimedAction[];
+  /** metrics[i] = latched values by game time i+1 seconds */
   metrics: Metrics[];
 }
 
 const zero = (): Metrics => Object.fromEntries(METRICS.map((m) => [m, 0])) as Metrics;
 
-/** A copy of `level` whose goal can never be met, so the bot plays every round. */
+/** A copy of `level` whose goal can never be met, so the bot is never 'cleared' (the sim ignores goals anyway). */
 function endless(level: LevelDef): LevelDef {
-  return { ...level, goals: [{ type: 'novae', count: 1e9, byRound: level.rounds, label: 'calibration' }], rewards: undefined };
+  return { ...level, goals: [{ type: 'novae', count: 1e9, deadlineSec: 1e9, points: 0, label: 'calibration' }], rewards: undefined, solution: undefined };
 }
 
 interface Runner { name: string; g: Game; ctx: Ctx; queue: Item[]; run: BotRun; cur: Metrics }
 
-function startRunner(name: string, level: LevelDef, world: BoardSize): Runner {
+function startRunner(name: string | null, level: LevelDef, world: BoardSize): Runner {
   const g = createGame(level.id, undefined, { level: endless(level), world });
   g.apply({ type: 'start' });
   const s = g.state();
   const f = new Frame(s.width, s.height, level.swirl ?? 1);
-  return { name, g, ctx: { s, f }, queue: VARIANTS[name].filter((it) => level.tools.includes(it.tool)), run: { variant: name, actions: [], metrics: [] }, cur: zero() };
+  const queue = name ? VARIANTS[name].filter((it) => level.tools.includes(it.tool)) : [];
+  return { name: name ?? 'idle', g, ctx: { s, f }, queue, run: { variant: name ?? 'idle', timeline: [], metrics: [] }, cur: zero() };
 }
 
-const MAX_PER_ROUND = 3;
-
-/** Plan (in order, stop at the first unaffordable item) and run one round. */
-function playRound(r: Runner): void {
+/** Act (in plan order, stop at the first unaffordable item), then run ACT_SEC seconds sampling every second. */
+function playSpan(r: Runner, sec = ACT_SEC): void {
   const s = r.g.state();
   r.ctx.s = s;
   let placed = 0;
-  while (r.queue.length && placed < MAX_PER_ROUND) {
+  while (r.queue.length && placed < MAX_PER_ACT) {
     const it = r.queue[0];
-    if (it.minRound > s.round) break;
+    if ((it.minRound - 1) * ROUND_SEC > s.time + 1e-9) break;
     if (s.energy < TOOL_DEFS[it.tool].cost) break;
     r.queue.shift();
     const p = it.at(r.ctx);
@@ -177,15 +164,13 @@ function playRound(r: Runner): void {
       const b = r.ctx.f.toBoard(p.u2, p.v2);
       act.x2 = round2(b.x); act.y2 = round2(b.y);
     }
-    if (r.g.apply(act).ok) { r.run.actions.push(act); placed++; }
+    if (r.g.apply(act).ok) { r.run.timeline.push({ t: s.totalTick / TICKS_PER_SECOND, action: act }); placed++; }
   }
-  r.run.actions.push({ type: 'endRound' });
-  r.g.apply({ type: 'endRound' });
-  // sample exactly where the game evaluates goals (every 10 ticks and at round end)
-  while (r.g.step(10)) sampleMetrics(s, r.cur);
-  sampleMetrics(r.g.state(), r.cur);
-  r.run.metrics.push({ ...r.cur });
-  if (r.g.state().phase === 'roundEnd') r.g.apply({ type: 'start' });
+  for (let i = 0; i < sec; i++) {
+    r.g.step(TICKS_PER_SECOND);
+    sampleMetrics(r.g.state(), r.cur);
+    r.run.metrics.push({ ...r.cur });
+  }
 }
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
@@ -196,22 +181,35 @@ export const defaultScorer: Scorer = (m) =>
   m.clouds + 2 * m.planets + 6 * m.stars + 8 * m.giants + 8 * m.dwarfs + 20 * m.novae + (m.He + m.CO + m.Fe) / 20;
 
 /**
- * Play `level` with each variant for `screenRounds` rounds, then continue only the best one to the end.
- * Returns the best run (actions + per-round metrics).
+ * Play `level` for `horizonSec` seconds: each variant for `screenSec`, then only the best one continues.
+ * Returns the best run (timeline + per-second metrics).
  */
-export function runBot(level: LevelDef, world: BoardSize, opts: { variants?: string[]; screenRounds?: number; score?: Scorer } = {}): BotRun {
+export function runBot(level: LevelDef, world: BoardSize, opts: { horizonSec: number; variants?: string[]; screenSec?: number; score?: Scorer }): BotRun {
   const names = opts.variants ?? Object.keys(VARIANTS);
   const score = opts.score ?? defaultScorer;
-  const screen = Math.min(level.rounds, opts.screenRounds ?? 2);
+  const horizon = Math.ceil(opts.horizonSec / ACT_SEC) * ACT_SEC;
+  const screen = Math.min(horizon, opts.screenSec ?? 2 * ROUND_SEC);
   let runners = names.map((n) => startRunner(n, level, world));
-  for (let r = 0; r < screen; r++) for (const x of runners) playRound(x);
-  if (runners.length > 1 && screen < level.rounds) {
+  for (let t = 0; t < screen; t += ACT_SEC) for (const x of runners) playSpan(x);
+  if (runners.length > 1 && screen < horizon) {
     // early on, the heaviest body (progress toward a star) matters more than the counts so far
     const early = (x: Runner) => score(x.cur) + x.g.state().bodies.reduce((m, b) => Math.max(m, b.mass), 0) / 10;
     runners.sort((a, b) => early(b) - early(a) || names.indexOf(a.name) - names.indexOf(b.name));
     runners = [runners[0]];
   }
-  for (const x of runners) while (x.g.state().phase === 'plan') playRound(x);
+  for (const x of runners) while (x.run.metrics.length < horizon) playSpan(x);
   runners.sort((a, b) => score(b.cur) - score(a.cur) || names.indexOf(a.name) - names.indexOf(b.name));
   return runners[0].run;
+}
+
+/**
+ * Place nothing for up to `horizonSec`, sampling metrics each second. `stop(metrics, sec)` may end the run early.
+ */
+export function runIdle(level: LevelDef, world: BoardSize, horizonSec: number, stop?: (m: Metrics, sec: number, s: GameState) => boolean): Metrics[] {
+  const r = startRunner(null, level, world);
+  while (r.run.metrics.length < horizonSec) {
+    playSpan(r, 1);
+    if (stop?.(r.cur, r.run.metrics.length, r.g.state())) break;
+  }
+  return r.run.metrics;
 }

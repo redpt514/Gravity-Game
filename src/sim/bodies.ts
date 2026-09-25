@@ -1,4 +1,4 @@
-import { P } from './params.ts';
+import { P, POINTS } from './params.ts';
 import { sample } from './field.ts';
 import { currentAt, forEachFreeNear } from './particles.ts';
 import { swirlStrength } from './force.ts';
@@ -23,7 +23,7 @@ export function radiusFor(kind: BodyKind, m: number): number {
 
 export function log(w: World, msg: string): void {
   const s = w.s;
-  s.log.push(`R${s.round} t${s.tick}: ${msg}`);
+  s.log.push(`${s.time.toFixed(1)}s: ${msg}`);
   if (s.log.length > P.logLines) s.log.splice(0, s.log.length - P.logLines);
 }
 
@@ -38,6 +38,7 @@ export function setKind(w: World, b: Body, kind: BodyKind, quiet = false): void 
   b.progress = 0;
   b.radius = radiusFor(kind, b.mass);
   w.s.scoreboard.starsByKind[kind]++;
+  if (!quiet) award(w, kind);
   if (!quiet) {
     const verb: Record<BodyKind, string> = {
       cloud: 'formed', planet: 'condensed', star_ms: 'ignited', star_giant: 'swelled',
@@ -45,6 +46,16 @@ export function setKind(w: World, b: Body, kind: BodyKind, quiet = false): void 
     };
     log(w, `${fmt(b)} ${verb[kind]}`);
   }
+}
+
+/** Points for a formation event (live). Merges that only relabel a body do not score. */
+export function award(w: World, what: BodyKind | 'supernova'): void {
+  const pb = w.s.scoreboard.pointsBy;
+  const v = POINTS[what];
+  if (what === 'cloud') pb.clouds += v;
+  else if (what === 'planet') pb.planets += v;
+  else if (what === 'supernova') pb.novae += v;
+  else pb.stars += v;
 }
 
 function newBody(w: World, kind: BodyKind, x: number, y: number): Body {
@@ -244,6 +255,7 @@ export function formClouds(w: World): void {
     for (const q of got) capture(w, b, q);
     b.radius = radiusFor('cloud', b.mass);
     s.scoreboard.cloudsFormed++;
+    award(w, 'cloud');
     log(w, `${fmt(b)} formed`);
     made++;
   }
@@ -320,7 +332,8 @@ function supernova(w: World, b: Body): void {
   s.scoreboard.elements.Fe += nFe;
   s.scoreboard.elements.heavy += nHeavy;
   s.scoreboard.novae++;
-  s.events.push({ round: s.round, tick: s.tick, x: b.x, y: b.y, mass: b.mass, kind: 'supernova' });
+  award(w, 'supernova');
+  s.events.push({ t: s.time, x: b.x, y: b.y, mass: b.mass, kind: 'supernova' });
   log(w, `SUPERNOVA${b.kind === 'white_dwarf' ? ' (type Ia)' : ''}! ${fmt(b)} ejected ${eject} particles (Fe ${nFe}, heavy ${nHeavy})`);
   // pick ejected particles and assign their elements
   const order: Element[] = [];
@@ -357,7 +370,7 @@ export function lifecycle(w: World): void {
     const m = b.mass;
     if (m <= 0) continue;
     if (m >= P.collapseMass && b.kind !== 'black_hole') {
-      s.events.push({ round: s.round, tick: s.tick, x: b.x, y: b.y, mass: m, kind: 'collapse' });
+      s.events.push({ t: s.time, x: b.x, y: b.y, mass: m, kind: 'collapse' });
       setKind(w, b, 'black_hole');
       continue;
     }
@@ -402,7 +415,7 @@ export function lifecycle(w: World): void {
         // a neutron star pushed past its limit (by merging) collapses into a black hole
         b.progress = Math.min(1, m / P.neutronMaxMass);
         if (m >= P.neutronMaxMass) {
-          s.events.push({ round: s.round, tick: s.tick, x: b.x, y: b.y, mass: m, kind: 'collapse' });
+          s.events.push({ t: s.time, x: b.x, y: b.y, mass: m, kind: 'collapse' });
           setKind(w, b, 'black_hole');
         }
         break;

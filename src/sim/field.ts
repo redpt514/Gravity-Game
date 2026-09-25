@@ -89,10 +89,10 @@ export function segDist(px: number, py: number, ax: number, ay: number, bx: numb
 export function nodeStrength(w: World, n: Node): number {
   const def = TOOL_DEFS[n.tool];
   if (n.tool === 'pulse') {
-    const s = w.s;
-    if (s.phase !== 'running' || n.placedRound !== s.round) return 0;
-    const f = 1 - s.tick / s.level.ticksPerRound;
-    return def.strength * Math.max(0, f);
+    // fades linearly from placement to expiry
+    const dur = def.durationSec ?? 1;
+    const f = n.expiresAt === null ? 1 : (n.expiresAt - w.s.time) / dur;
+    return def.strength * Math.max(0, Math.min(1, f));
   }
   if (n.tool === 'black_hole') {
     const m = (n as Node & { mass?: number }).mass ?? P.blackHoleStartMass;

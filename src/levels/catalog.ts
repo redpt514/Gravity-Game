@@ -10,7 +10,7 @@ import type { BoardSize } from './bot.ts';
 
 export const HANDCRAFTED_COUNT = 3;
 /** Bump when the generator or sim tuning changes, so persisted caches are invalidated. */
-export const PROCGEN_VERSION = 1;
+export const PROCGEN_VERSION = 2;
 
 export function levelCacheKey(n: number, world: BoardSize): string {
   return `v${PROCGEN_VERSION}:L${n}:${world.width}x${world.height}:${world.gridW}x${world.gridH}`;
