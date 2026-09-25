@@ -1,59 +1,58 @@
-/** HUD: top bar, goals, tool palette, run/progress control, intro/round-end/won/lost cards. */
-import type { Goal, GameState, ToolId } from '../sim/types';
-import { TOOL_DEFS, TOOL_COLOR } from '../render/toolDefs';
-import { P } from '../sim/params';
-import { createToastManager } from './toast';
+/** HUD: top bar (score/energy), a countdown-goal pill strip (never overlays the board), bottom
+ * palette + play controls (pause/speed/hint), and the intro card / non-blocking cleared banner. */
+import type { GameState, GoalStatus, ToolId } from '../sim/types';
+import { GOAL_ICON, TOOL_COLOR, TOOL_DEFS } from '../render/toolDefs';
+import { createToastManager, type ToastOptions } from './toast';
 
 export interface HudUiState {
   selectedTool: ToolId | null;
-  speed: 1 | 2;
+  paused: boolean;
+  speed: 1 | 2 | 4;
   scoreboardOpen: boolean;
   logOpen: boolean;
+  /** best-known cost of the next hint (updated from ActionResult.hint.cost after each use);
+   * a reasonable starting guess before the first hint is ever taken. */
+  hintCost: number;
+  clearedCollapsed: boolean;
 }
 
 export interface HudCallbacks {
   onSelectTool(tool: ToolId): void;
-  onStart(): void; // Action{type:'start'}: dismiss intro/roundEnd card -> plan (or won/lost)
-  onEndRound(): void; // Action{type:'endRound'}: plan -> running
+  onStart(): void; // Action{type:'start'}: intro -> playing
+  onTogglePause(): void;
+  onCycleSpeed(): void;
+  onHint(): void; // Action{type:'hint'}
   onRestart(): void;
-  onNewLayout(): void; // lost card: retry with a freshly-picked seed
-  onNextLevel(): void; // won screen: advance to the following level
-  onLevels(): void; // won/lost screen: back to level select
-  onToggleSpeed(): void;
+  onNewLayout(): void;
+  onNextLevel(): void; // cleared banner: advance to the following level
+  onLevels(): void; // back to level select
   onToggleScoreboard(): void;
   onToggleLog(): void;
+  onToggleCleared(): void;
 }
 
 const KIND_LABEL: Record<string, string> = {
-  cloud: 'Clouds',
-  planet: 'Planets',
-  star_ms: 'Main-sequence stars',
-  star_giant: 'Red giants',
-  white_dwarf: 'White dwarfs',
-  neutron: 'Neutron stars',
-  black_hole: 'Black holes',
+  cloud: 'Clouds', planet: 'Planets', star_ms: 'Main-sequence stars', star_giant: 'Red giants',
+  white_dwarf: 'White dwarfs', neutron: 'Neutron stars', black_hole: 'Black holes',
 };
 
 function fmt(n: number): string {
   return n >= 100 ? Math.round(n).toString() : (Math.round(n * 10) / 10).toString();
 }
 
-/** "best body 112/120" hint for a not-yet-met goal: the nearest body's progress toward the
- * mass threshold the goal is chasing. Reads thresholds from sim/params.ts at call time. */
-function bestBodyProgress(state: GameState, goal: Goal): string | null {
-  if (goal.type === 'stars' || goal.type === 'star_kind') {
-    const cand = state.bodies.filter((b) => b.kind === 'cloud' || b.kind === 'planet');
-    if (!cand.length) return null;
-    const best = cand.reduce((a, b) => (b.mass > a.mass ? b : a));
-    return `best body ${Math.round(best.mass)}/${P.starMass}`;
-  }
-  if (goal.type === 'planets') {
-    const cand = state.bodies.filter((b) => b.kind === 'cloud');
-    if (!cand.length) return null;
-    const best = cand.reduce((a, b) => (b.mass > a.mass ? b : a));
-    return `best body ${Math.round(best.mass)}/${P.planetMass}`;
-  }
-  return null;
+function mmss(sec: number): string {
+  const s = Math.max(0, Math.round(sec));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${r.toString().padStart(2, '0')}`;
+}
+
+function pillState(g: GoalStatus): 'met' | 'missed' | 'red' | 'amber' | '' {
+  if (g.met) return 'met';
+  if (g.missed) return 'missed';
+  if (g.remainingSec < 10) return 'red';
+  if (g.goal.deadlineSec > 0 && g.remainingSec < g.goal.deadlineSec * 0.25) return 'amber';
+  return '';
 }
 
 export function createHud(root: HTMLElement, cb: HudCallbacks) {
@@ -61,30 +60,39 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
     <div class="layer" id="h-top-layer">
       <div class="topbar panel">
         <span class="level-name" id="h-level"></span>
-        <span class="round" id="h-round"></span>
+        <span class="score" id="h-score"></span>
         <span class="energy" id="h-energy"></span>
         <span class="spacer-x"></span>
-        <button class="goals-chip" id="h-goals-chip"></button>
         <button class="icon-btn" id="h-menu-toggle" aria-label="Menu">&#8942;</button>
       </div>
-      <div class="dropdown goals-drawer panel" id="h-goals-drawer" hidden></div>
+      <div class="goal-strip" id="h-goal-strip"></div>
       <div class="dropdown panel" id="h-menu-drawer" hidden>
         <div class="menu-actions">
-          <button id="h-speed">1x speed</button>
           <button id="h-log-toggle">Log</button>
           <button id="h-score-toggle">Scoreboard</button>
+        </div>
+        <div class="menu-actions">
+          <button id="h-restart">Restart</button>
+          <button id="h-newlayout">New layout</button>
+          <button id="h-levels">Levels</button>
         </div>
         <div class="scoreboard-drawer" id="h-score-drawer" hidden></div>
         <div class="log-drawer" id="h-log-drawer-inner" hidden></div>
       </div>
       <div class="toast-stack" id="h-toasts"></div>
+      <div class="popup-layer" id="h-popups"></div>
+      <div class="cleared-banner panel" id="h-cleared" hidden></div>
     </div>
     <div class="spacer"></div>
     <div class="layer" id="h-bottom-layer">
       <div class="tool-strip panel" id="h-tool-strip" hidden></div>
       <div class="bottombar panel" id="h-bottombar">
         <div class="palette" id="h-palette"></div>
-        <div class="run-row" id="h-runrow"></div>
+        <div class="controls" id="h-controls">
+          <button class="ctrl-btn" id="h-playpause" aria-label="Pause/Play"></button>
+          <button class="ctrl-btn speed-btn" id="h-speed" aria-label="Speed"></button>
+          <button class="ctrl-btn hint-btn" id="h-hint" aria-label="Hint"></button>
+        </div>
       </div>
     </div>
     <div id="h-overlay"></div>
@@ -92,68 +100,91 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
 
   const el = {
     level: root.querySelector<HTMLElement>('#h-level')!,
-    round: root.querySelector<HTMLElement>('#h-round')!,
+    score: root.querySelector<HTMLElement>('#h-score')!,
     energy: root.querySelector<HTMLElement>('#h-energy')!,
-    goalsChip: root.querySelector<HTMLButtonElement>('#h-goals-chip')!,
-    goalsDrawer: root.querySelector<HTMLElement>('#h-goals-drawer')!,
+    goalStrip: root.querySelector<HTMLElement>('#h-goal-strip')!,
     menuToggle: root.querySelector<HTMLButtonElement>('#h-menu-toggle')!,
     menuDrawer: root.querySelector<HTMLElement>('#h-menu-drawer')!,
-    speed: root.querySelector<HTMLButtonElement>('#h-speed')!,
     scoreToggle: root.querySelector<HTMLButtonElement>('#h-score-toggle')!,
     scoreDrawer: root.querySelector<HTMLElement>('#h-score-drawer')!,
     logToggle: root.querySelector<HTMLButtonElement>('#h-log-toggle')!,
     logDrawer: root.querySelector<HTMLElement>('#h-log-drawer-inner')!,
+    restart: root.querySelector<HTMLButtonElement>('#h-restart')!,
+    newLayout: root.querySelector<HTMLButtonElement>('#h-newlayout')!,
+    levels: root.querySelector<HTMLButtonElement>('#h-levels')!,
     toolStrip: root.querySelector<HTMLElement>('#h-tool-strip')!,
     bottombar: root.querySelector<HTMLElement>('#h-bottombar')!,
     palette: root.querySelector<HTMLElement>('#h-palette')!,
-    runrow: root.querySelector<HTMLElement>('#h-runrow')!,
+    playPause: root.querySelector<HTMLButtonElement>('#h-playpause')!,
+    speed: root.querySelector<HTMLButtonElement>('#h-speed')!,
+    hint: root.querySelector<HTMLButtonElement>('#h-hint')!,
+    cleared: root.querySelector<HTMLElement>('#h-cleared')!,
     overlay: root.querySelector<HTMLElement>('#h-overlay')!,
     toasts: root.querySelector<HTMLElement>('#h-toasts')!,
+    popups: root.querySelector<HTMLElement>('#h-popups')!,
   };
 
   const toaster = createToastManager(el.toasts);
 
-  // Goals start expanded so the player sees what to do; the chip collapses them.
-  let goalsOpen = true;
   let menuOpen = false;
-  el.goalsDrawer.hidden = false;
   el.menuDrawer.hidden = true;
-  el.goalsChip.addEventListener('click', (ev) => {
-    ev.stopPropagation();
-    goalsOpen = !goalsOpen;
-    menuOpen = false;
-    el.goalsDrawer.hidden = !goalsOpen;
-    el.menuDrawer.hidden = true;
-  });
   el.menuToggle.addEventListener('click', (ev) => {
     ev.stopPropagation();
     menuOpen = !menuOpen;
-    goalsOpen = false;
     el.menuDrawer.hidden = !menuOpen;
-    el.goalsDrawer.hidden = true;
   });
-  // Outside clicks close the menu only; the goals list stays until its chip is tapped.
   root.addEventListener('click', () => {
     menuOpen = false;
     el.menuDrawer.hidden = true;
+    hideGoalTooltip();
   });
-  el.goalsDrawer.addEventListener('click', (ev) => ev.stopPropagation());
   el.menuDrawer.addEventListener('click', (ev) => ev.stopPropagation());
 
-  el.speed.addEventListener('click', () => cb.onToggleSpeed());
   el.scoreToggle.addEventListener('click', () => cb.onToggleScoreboard());
   el.logToggle.addEventListener('click', () => cb.onToggleLog());
+  el.restart.addEventListener('click', () => cb.onRestart());
+  el.newLayout.addEventListener('click', () => cb.onNewLayout());
+  el.levels.addEventListener('click', () => cb.onLevels());
+  el.playPause.addEventListener('click', () => cb.onTogglePause());
+  el.speed.addEventListener('click', () => cb.onCycleSpeed());
+  el.hint.addEventListener('click', () => cb.onHint());
+
+  let goalTooltipEl: HTMLElement | null = null;
+  function hideGoalTooltip() {
+    if (goalTooltipEl) { goalTooltipEl.remove(); goalTooltipEl = null; }
+  }
+  function showGoalTooltip(btn: HTMLElement, label: string) {
+    hideGoalTooltip();
+    const div = document.createElement('div');
+    div.className = 'goal-tooltip panel';
+    div.textContent = label;
+    const r = btn.getBoundingClientRect();
+    div.style.left = `${r.left + r.width / 2}px`;
+    div.style.top = `${r.bottom + 6}px`;
+    root.appendChild(div);
+    goalTooltipEl = div;
+    setTimeout(() => { if (goalTooltipEl === div) hideGoalTooltip(); }, 2600);
+  }
 
   let lastPaletteKey = '';
   let lastPhase = '';
-  let lastRunRowPhase = '';
   let lastLogLen = -1;
   let lastLogRenderKey = '';
   let lastSelectedTool: ToolId | null = null;
+  let lastGoalKey = '';
+  let lastClearedShown = false;
 
   function renderScoreboardRows(state: GameState): string {
     const sb = state.scoreboard;
     const rows: string[] = [];
+    rows.push(`<div class="k">Points</div><div class="v">${fmt(sb.points)}</div>`);
+    rows.push(`<div class="k">— from clouds</div><div class="v">${fmt(sb.pointsBy.clouds)}</div>`);
+    rows.push(`<div class="k">— from planets</div><div class="v">${fmt(sb.pointsBy.planets)}</div>`);
+    rows.push(`<div class="k">— from stars</div><div class="v">${fmt(sb.pointsBy.stars)}</div>`);
+    rows.push(`<div class="k">— from novae</div><div class="v">${fmt(sb.pointsBy.novae)}</div>`);
+    rows.push(`<div class="k">— from elements</div><div class="v">${fmt(sb.pointsBy.elements)}</div>`);
+    rows.push(`<div class="k">— from goals</div><div class="v">${fmt(sb.pointsBy.goals)}</div>`);
+    rows.push(`<div class="k">— spent on hints</div><div class="v">−${fmt(sb.pointsBy.spentHints)}</div>`);
     rows.push(`<div class="k">Clouds formed</div><div class="v">${fmt(sb.cloudsFormed)}</div>`);
     for (const kind of Object.keys(sb.starsByKind)) {
       if (kind === 'cloud') continue;
@@ -162,62 +193,61 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
       rows.push(`<div class="k">${KIND_LABEL[kind] ?? kind}</div><div class="v">${fmt(n)}</div>`);
     }
     rows.push(`<div class="k">Novae</div><div class="v">${fmt(sb.novae)}</div>`);
-    for (const el2 of Object.keys(sb.elements)) {
-      const n = sb.elements[el2 as keyof typeof sb.elements];
-      rows.push(`<div class="k">${el2}</div><div class="v">${fmt(n)}</div>`);
+    for (const e of Object.keys(sb.elements)) {
+      rows.push(`<div class="k">${e}</div><div class="v">${fmt(sb.elements[e as keyof typeof sb.elements])}</div>`);
     }
     return rows.join('');
   }
 
   function update(state: GameState, ui: HudUiState) {
     el.level.textContent = state.level.name;
-    el.round.textContent = `R${state.round}/${state.level.rounds}`;
-    el.energy.innerHTML = `⚡${Math.floor(state.energy)}${
-      state.phase === 'plan' ? `<span class="income">+${state.level.incomePerRound}</span>` : ''
-    }`;
-    el.speed.textContent = `${ui.speed}x speed`;
-    el.speed.classList.toggle('on', ui.speed === 2);
+    el.score.innerHTML = `<span class="score-icon">✦</span>${fmt(state.scoreboard.points)}`;
+    el.energy.innerHTML = `⚡${Math.floor(state.energy)}<span class="income">+${state.level.incomePerSec}/s</span>`;
 
-    // goals summary chip (collapsed) + full list in its dropdown
-    const metCount = state.goals.filter((g) => g.met).length;
-    const anyDeadline = state.goals.some(
-      (g) => !g.met && g.goal.byRound === state.round && state.phase !== 'plan',
-    );
-    el.goalsChip.className = `goals-chip${
-      metCount === state.goals.length && state.goals.length > 0 ? ' all-met' : anyDeadline ? ' deadline' : ''
-    }`;
-    el.goalsChip.innerHTML = `<span class="dot"></span><span>Goals ${metCount}/${state.goals.length}</span>`;
-    // each goal shows the nearest body's progress toward the threshold it needs, if any
-    el.goalsDrawer.innerHTML = state.goals
-      .map((g) => {
-        const deadline = !g.met && g.goal.byRound === state.round && state.phase !== 'plan';
-        const cls = g.met ? 'met' : deadline ? 'deadline' : '';
-        const near = g.met ? null : bestBodyProgress(state, g.goal);
-        return `<div class="goal ${cls}"><span class="dot"></span><span>${g.goal.label} (${fmt(
-          g.current,
-        )}/${g.goal.count})${near ? ` — ${near}` : ''}</span><span class="byround">by rd ${g.goal.byRound}</span></div>`;
-      })
-      .join('');
-
-    // scoreboard drawer (inside the overflow menu)
-    el.scoreDrawer.hidden = !ui.scoreboardOpen;
-    if (ui.scoreboardOpen) {
-      el.scoreDrawer.innerHTML = `<div class="scorelist">${renderScoreboardRows(state)}</div>`;
+    // ---- goal countdown pill strip (part of the reserved HUD height — never over the board) ----
+    const goalKey = state.goals
+      .map((g) => `${g.current}|${g.met}|${g.missed}|${Math.ceil(g.remainingSec)}`)
+      .join(';');
+    if (goalKey !== lastGoalKey) {
+      lastGoalKey = goalKey;
+      el.goalStrip.hidden = state.goals.length === 0;
+      el.goalStrip.innerHTML = state.goals
+        .map((g, i) => {
+          const st = pillState(g);
+          const icon = GOAL_ICON[g.goal.type] ?? '★';
+          const frac = g.goal.deadlineSec > 0 ? Math.max(0, Math.min(1, g.remainingSec / g.goal.deadlineSec)) : 0;
+          const timer = g.met ? '✓' : g.missed ? '✕' : mmss(g.remainingSec);
+          return `<button class="goal-pill ${st}" data-i="${i}" title="${g.goal.label}">
+            <span class="gp-icon">${icon}</span>
+            <span class="gp-body">
+              <span class="gp-label">${g.goal.label}</span>
+              <span class="gp-progress">${fmt(g.current)}/${g.goal.count}</span>
+            </span>
+            <span class="gp-timer">${timer}</span>
+            <span class="gp-bar"><span class="gp-bar-fill" style="width:${frac * 100}%"></span></span>
+          </button>`;
+        })
+        .join('');
+      el.goalStrip.querySelectorAll<HTMLButtonElement>('.goal-pill').forEach((btn) => {
+        btn.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          const i = Number(btn.dataset.i);
+          const g = state.goals[i];
+          if (g) showGoalTooltip(btn, `${g.goal.label} — ${fmt(g.current)}/${g.goal.count}`);
+        });
+      });
     }
-    const showScoreToggle = state.phase === 'plan' || state.phase === 'running' || state.phase === 'roundEnd';
-    el.scoreToggle.hidden = !showScoreToggle;
-    el.logToggle.hidden = !showScoreToggle;
-    el.goalsChip.hidden = !showScoreToggle || state.goals.length === 0;
-    if (!showScoreToggle) { el.scoreDrawer.hidden = true; el.logDrawer.hidden = true; }
 
-    // event log: collapsible panel (last 8) + a toast for each new entry
+    // scoreboard / log drawer (inside the overflow menu)
+    el.scoreDrawer.hidden = !ui.scoreboardOpen;
+    if (ui.scoreboardOpen) el.scoreDrawer.innerHTML = `<div class="scorelist">${renderScoreboardRows(state)}</div>`;
+
     if (lastLogLen < 0 || state.log.length < lastLogLen) {
-      // first render, or the game restarted and the log reset — resync without toasting
-      lastLogLen = state.log.length;
+      lastLogLen = state.log.length; // first render, or a restart reset the log — resync without toasting
     } else if (state.log.length > lastLogLen) {
       for (let i = lastLogLen; i < state.log.length; i++) {
         const line = state.log[i];
-        const warn = /lost|supernova|missed/i.test(line);
+        const warn = /missed/i.test(line);
         toaster.show(line, warn ? 'warn' : 'info');
       }
       lastLogLen = state.log.length;
@@ -228,53 +258,51 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
       const key = last8.join('|');
       if (key !== lastLogRenderKey) {
         lastLogRenderKey = key;
-        el.logDrawer.innerHTML = `<div class="loglist">${last8
-          .map((l) => `<div class="logline">${l}</div>`)
-          .join('')}</div>`;
+        el.logDrawer.innerHTML = `<div class="loglist">${last8.map((l) => `<div class="logline">${l}</div>`).join('')}</div>`;
       }
     }
 
-    // palette + run row only meaningful during plan/running/roundEnd
-    const inPlay = state.phase === 'plan' || state.phase === 'running' || state.phase === 'roundEnd';
-    el.bottombar.style.display = inPlay ? 'flex' : 'none';
+    // ---- palette ----
+    const inPlay = state.phase === 'playing' || state.phase === 'cleared';
+    el.bottombar.style.display = inPlay || state.phase === 'intro' ? 'flex' : 'none';
     if (!inPlay) el.toolStrip.hidden = true;
 
     if (inPlay) {
-      const paletteKey = `${state.phase}|${state.energy}|${ui.selectedTool}|${state.level.tools.join(',')}|${JSON.stringify(
-        state.inventory,
-      )}`;
+      // Rebuild the chip DOM only when the tool set/inventory/selection changes — energy trickles
+      // in continuously now (income/sec), and rebuilding on every tick would detach chips out from
+      // under an in-flight click/drag. Affordability (disabled + cost text) is patched in place
+      // below every frame instead, cheaply.
+      const paletteKey = `${ui.selectedTool}|${state.level.tools.join(',')}|${Object.keys(state.inventory).join(',')}`;
       if (paletteKey !== lastPaletteKey) {
         lastPaletteKey = paletteKey;
-        // palette = this level's tools, plus any reward tool sitting in inventory
-        // (e.g. black_hole from a previous level's win) even if not in level.tools
         const invTools = (Object.keys(state.inventory) as ToolId[]).filter(
           (t) => (state.inventory[t] ?? 0) > 0 && !state.level.tools.includes(t),
         );
         el.palette.innerHTML = [...state.level.tools, ...invTools]
           .map((tool) => {
             const def = TOOL_DEFS[tool];
-            const inv = state.inventory[tool] ?? 0;
-            const affordable = inv > 0 || state.energy >= def.cost;
             const selected = ui.selectedTool === tool;
-            const disabled = state.phase !== 'plan' || !affordable;
-            return `<button class="tool-chip${selected ? ' selected' : ''}" data-tool="${tool}" title="${
-              def.description
-            }" ${disabled ? 'disabled' : ''}>
+            return `<button class="tool-chip${selected ? ' selected' : ''}" data-tool="${tool}" title="${def.description}">
               <span class="dot" style="background:${TOOL_COLOR[tool]}"></span>
               <span class="chip-name">${def.name}</span>
-              <span class="chip-cost">${inv > 0 ? `free ×${inv}` : `⚡${def.cost}`}</span>
+              <span class="chip-cost"></span>
             </button>`;
           })
           .join('');
         el.palette.querySelectorAll<HTMLButtonElement>('.tool-chip').forEach((btn) => {
-          btn.addEventListener('click', () => {
-            const tool = btn.dataset.tool as ToolId;
-            cb.onSelectTool(tool);
-          });
+          btn.addEventListener('click', () => cb.onSelectTool(btn.dataset.tool as ToolId));
         });
       }
+      el.palette.querySelectorAll<HTMLButtonElement>('.tool-chip').forEach((btn) => {
+        const tool = btn.dataset.tool as ToolId;
+        const def = TOOL_DEFS[tool];
+        const inv = state.inventory[tool] ?? 0;
+        const affordable = inv > 0 || state.energy >= def.cost;
+        btn.disabled = !affordable;
+        const cost = btn.querySelector<HTMLElement>('.chip-cost');
+        if (cost) cost.textContent = inv > 0 ? `free ×${inv}` : `⚡${def.cost}`;
+      });
 
-      // selected tool's one-line description, shown in a strip above the palette
       if (ui.selectedTool !== lastSelectedTool) {
         lastSelectedTool = ui.selectedTool;
         if (ui.selectedTool) {
@@ -286,29 +314,50 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
         }
       }
 
-      const pct = Math.min(100, Math.round((state.tick / state.level.ticksPerRound) * 100));
-      if (state.phase !== lastRunRowPhase) {
-        lastRunRowPhase = state.phase;
-        if (state.phase === 'plan') {
-          el.runrow.innerHTML = `<button class="btn-primary" id="h-run">Run round</button>`;
-          el.runrow.querySelector('#h-run')!.addEventListener('click', () => cb.onEndRound());
-        } else if (state.phase === 'running') {
-          el.runrow.innerHTML = `<div class="progress-wrap"><div class="progress-track"><div class="progress-fill" id="h-progress-fill" style="width:${pct}%"></div></div><div class="progress-label" id="h-progress-label">Round ${state.round} running… ${pct}%</div></div>`;
-        } else if (state.phase === 'roundEnd') {
-          el.runrow.innerHTML = `<button class="btn-primary" id="h-continue">Continue</button>`;
-          el.runrow.querySelector('#h-continue')!.addEventListener('click', () => cb.onStart());
-        }
-      } else if (state.phase === 'running') {
-        // patch the existing bar in place instead of rebuilding DOM every frame
-        // (rebuilding here would race with in-flight pointer/click handling)
-        const fill = el.runrow.querySelector<HTMLElement>('#h-progress-fill');
-        const label = el.runrow.querySelector<HTMLElement>('#h-progress-label');
-        if (fill) fill.style.width = `${pct}%`;
-        if (label) label.textContent = `Round ${state.round} running… ${pct}%`;
-      }
+      // pause/play + speed + hint controls
+      el.playPause.textContent = ui.paused ? '▶' : '⏸';
+      el.playPause.classList.toggle('on', ui.paused);
+      el.speed.textContent = `${ui.speed}×`;
+      el.speed.classList.toggle('on', ui.speed !== 1);
+      const canAffordHint = state.scoreboard.points >= ui.hintCost;
+      el.hint.textContent = `💡 Hint −${ui.hintCost}`;
+      el.hint.disabled = !canAffordHint;
+      el.hint.title = canAffordHint
+        ? 'Spend points for a suggested placement'
+        : `Not enough points (have ${fmt(state.scoreboard.points)}, need ${ui.hintCost})`;
     }
 
-    // overlays
+    // ---- non-blocking cleared banner ----
+    if (state.phase === 'cleared') {
+      if (!lastClearedShown || el.cleared.dataset.collapsed !== String(ui.clearedCollapsed)) {
+        lastClearedShown = true;
+        el.cleared.hidden = false;
+        el.cleared.dataset.collapsed = String(ui.clearedCollapsed);
+        const stars = '★'.repeat(state.stars) + '☆'.repeat(Math.max(0, 3 - state.stars));
+        if (ui.clearedCollapsed) {
+          el.cleared.innerHTML = `<button class="cleared-collapsed" id="h-cleared-expand">${stars} Cleared ▸</button>`;
+          el.cleared.querySelector('#h-cleared-expand')!.addEventListener('click', () => cb.onToggleCleared());
+        } else {
+          el.cleared.innerHTML = `
+            <div class="cleared-row">
+              <span class="cleared-text">Galaxy organized! ${stars} — keep going or move on</span>
+              <button class="icon-btn" id="h-cleared-collapse">▾</button>
+            </div>
+            <div class="cleared-actions">
+              <button class="btn-primary" id="h-cleared-next">Next level</button>
+              <button class="btn-secondary" id="h-cleared-retry">Retry</button>
+            </div>`;
+          el.cleared.querySelector('#h-cleared-collapse')!.addEventListener('click', () => cb.onToggleCleared());
+          el.cleared.querySelector('#h-cleared-next')!.addEventListener('click', () => cb.onNextLevel());
+          el.cleared.querySelector('#h-cleared-retry')!.addEventListener('click', () => cb.onRestart());
+        }
+      }
+    } else if (lastClearedShown) {
+      lastClearedShown = false;
+      el.cleared.hidden = true;
+      el.cleared.innerHTML = '';
+    }
+
     if (state.phase !== lastPhase) {
       lastPhase = state.phase;
       renderOverlay(state);
@@ -328,66 +377,21 @@ export function createHud(root: HTMLElement, cb: HudCallbacks) {
       el.overlay.querySelector('#h-start')!.addEventListener('click', () => cb.onStart());
       return;
     }
-    if (state.phase === 'roundEnd') {
-      const met = state.goals.filter((g) => g.goal.byRound <= state.round);
-      el.overlay.innerHTML = `
-        <div class="overlay" id="h-roundend-overlay" style="align-items:flex-end;background:transparent;padding-bottom:88px;pointer-events:none;">
-          <div class="card panel" style="width:min(360px,92vw);margin:0 auto;">
-            <h2>Round ${state.round} complete</h2>
-            <div class="scorelist">
-              ${met
-                .map(
-                  (g) =>
-                    `<div class="k">${g.goal.label}</div><div class="v" style="color:${
-                      g.met ? 'var(--good)' : 'var(--danger)'
-                    }">${g.met ? 'met' : 'missed'}</div>`,
-                )
-                .join('')}
-              <div class="k">Income</div><div class="v">+${state.level.incomePerRound}</div>
-            </div>
-          </div>
-        </div>`;
-      return;
-    }
-    if (state.phase === 'won' || state.phase === 'lost') {
-      const won = state.phase === 'won';
-      // lost: only show goals that were actually due, so the card doesn't blame goals with
-      // rounds left to go (see src/levels/goals.ts judge()).
-      const due = won ? [] : state.goals.filter((g) => g.goal.byRound <= state.round);
-      const dueRows = due
-        .map(
-          (g) =>
-            `<div class="k">${g.goal.label}</div><div class="v" style="color:${
-              g.met ? 'var(--good)' : 'var(--danger)'
-            }">${g.met ? 'met' : `missed (${fmt(g.current)}/${g.goal.count})`}</div>`,
-        )
-        .join('');
-      el.overlay.innerHTML = `
-        <div class="overlay">
-          <div class="card panel">
-            <h1>${won ? 'Level complete!' : 'Level failed'}</h1>
-            <p>${won ? 'All goals met. The nursery grows on.' : 'A due goal was missed:'}</p>
-            ${due.length ? `<div class="scorelist">${dueRows}</div>` : ''}
-            <div class="scorelist">${renderScoreboardRows(state)}</div>
-            <div class="row">
-              ${won ? '<button class="btn-primary" id="h-next">Next level</button>' : ''}
-              <button class="${won ? 'btn-secondary' : 'btn-primary'}" id="h-retry">${won ? 'Replay' : 'Retry'}</button>
-              ${!won ? '<button class="btn-secondary" id="h-newlayout">New layout</button>' : ''}
-              <button class="btn-secondary" id="h-exit">Levels</button>
-            </div>
-          </div>
-        </div>`;
-      if (won) {
-        el.overlay.querySelector('#h-next')!.addEventListener('click', () => cb.onNextLevel());
-      } else {
-        el.overlay.querySelector('#h-newlayout')!.addEventListener('click', () => cb.onNewLayout());
-      }
-      el.overlay.querySelector('#h-retry')!.addEventListener('click', () => cb.onRestart());
-      el.overlay.querySelector('#h-exit')!.addEventListener('click', () => cb.onLevels());
-      return;
-    }
     el.overlay.innerHTML = '';
   }
 
-  return { update, toast: toaster.show };
+  /** A floating "+N"-style popup at a screen position (px, viewport-relative), for formation
+   * events (new body, nova, goal met). Fades and rises, then removes itself. */
+  function popup(x: number, y: number, text: string, cls = '') {
+    const div = document.createElement('div');
+    div.className = `score-popup ${cls}`;
+    div.textContent = text;
+    div.style.left = `${x}px`;
+    div.style.top = `${y}px`;
+    el.popups.appendChild(div);
+    requestAnimationFrame(() => div.classList.add('go'));
+    setTimeout(() => div.remove(), 1300);
+  }
+
+  return { update, toast: (msg: string, opts?: 'info' | 'warn' | ToastOptions) => toaster.show(msg, opts), popup };
 }

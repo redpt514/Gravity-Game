@@ -1,9 +1,13 @@
 /** Canvas2D layer drawn above the WebGL nebula: particles, bodies, nodes, VFX. */
-import type { Body, BodyKind, GameState, Node as SimNode, ToolId } from '../sim/types';
+import type { Body, BodyKind, GameState, Hint, Node as SimNode, ToolId } from '../sim/types';
 import { computeLetterboxIn, worldToScreen, type Letterbox, type Rect } from './layout';
 import { ELEMENT_COLOR, TOOL_COLOR, TOOL_DEFS } from './toolDefs';
 import { P } from '../sim/params';
 import { forceAt } from '../sim/force';
+import { GRACE_SEC } from '../sim/types';
+
+/** How long an issued hint's ghost placement stays visible on the board, in game seconds. */
+export const HINT_GHOST_TTL_SEC = 20;
 
 /** Live placement preview drawn by input.ts while the player is dragging a tool into place. */
 export type Preview =
@@ -18,7 +22,7 @@ export interface SceneRenderer {
   lastLetterbox(): Letterbox;
 }
 
-const NOVA_FLASH_TICKS = 60; // ~2s at 30 ticks/s
+const NOVA_FLASH_SEC = 2;
 
 function drawSoftCircle(
   ctx: CanvasRenderingContext2D,
@@ -263,6 +267,7 @@ function drawNode(
   n: SimNode,
   lb: Letterbox,
   timeSec: number,
+  gameTime: number,
 ) {
   const def = TOOL_DEFS[n.tool];
   const color = TOOL_COLOR[n.tool];
@@ -287,10 +292,11 @@ function drawNode(
 
   ctx.save();
   let alpha = 0.85;
-  if (n.tool === 'pulse') {
-    // fading fill instead of dashed ring
-    const life = n.roundsLeft ?? 1;
-    alpha = Math.max(0.15, Math.min(1, life));
+  if (n.tool === 'pulse' && n.expiresAt != null) {
+    // fading fill as it counts down to expiresAt (game time)
+    const total = def.durationSec ?? 1;
+    const life = total > 0 ? Math.max(0, Math.min(1, (n.expiresAt - gameTime) / total)) : 0;
+    alpha = Math.max(0.15, life);
     const pulseR = r * (0.6 + 0.4 * (0.5 + 0.5 * Math.sin(timeSec * 3)));
     drawSoftCircle(ctx, p.x, p.y, pulseR, `rgba(255,107,107,${0.5 * alpha})`);
     ctx.restore();
@@ -312,6 +318,21 @@ function drawNode(
   ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
+
+  // Grace ring: a small shrinking ring on nodes still within GRACE_SEC of placement, showing
+  // the player they can still drag/move it for free.
+  const graceLeft = GRACE_SEC - (gameTime - n.placedAt);
+  if (graceLeft > 0) {
+    const frac = graceLeft / GRACE_SEC;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 1.5;
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 6 + 5 * frac, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 
 function drawPreview(
@@ -355,6 +376,42 @@ function drawPreview(
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.fill();
   }
+  ctx.restore();
+}
+
+/** Pulsing dashed ghost of a suggested placement (state.hint), plus a small lightbulb marker.
+ * ui/input.ts hit-tests the same geometry to let a tap-with-that-tool-selected place it. */
+function drawHintGhost(ctx: CanvasRenderingContext2D, hint: Hint, lb: Letterbox, timeSec: number) {
+  const pulse = 0.55 + 0.45 * Math.sin(timeSec * 4);
+  const color = TOOL_COLOR[hint.tool] ?? '#ffcf5c';
+  ctx.save();
+  ctx.globalAlpha = 0.35 + 0.35 * pulse;
+  ctx.setLineDash([4, 5]);
+  ctx.lineDashOffset = -timeSec * 14;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2.5;
+  if (hint.x2 !== undefined && hint.y2 !== undefined) {
+    const p1 = worldToScreen(hint.x, hint.y, lb);
+    const p2 = worldToScreen(hint.x2, hint.y2, lb);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+  } else {
+    const p = worldToScreen(hint.x, hint.y, lb);
+    const r = (TOOL_DEFS[hint.tool]?.radius ?? 14) * lb.scale;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  const p = worldToScreen(hint.x, hint.y, lb);
+  ctx.globalAlpha = 0.85;
+  ctx.font = `${14 + 3 * pulse}px -apple-system,BlinkMacSystemFont,sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('💡', p.x, p.y);
   ctx.restore();
 }
 
@@ -419,18 +476,23 @@ export function createSceneRenderer(canvas: HTMLCanvasElement): SceneRenderer {
 
     // nodes
     for (const n of state.nodes) {
-      drawNode(ctx, n, lb, timeSec);
+      drawNode(ctx, n, lb, timeSec, state.time);
     }
 
     // live placement preview
     if (preview) drawPreview(ctx, preview, lb, timeSec);
 
+    // hint ghost: a pulsing dashed suggestion the player can tap (with that tool selected) or
+    // accept via the toast's "Place it" button (ui/hud.ts + ui/input.ts)
+    if (state.hint && state.time - state.hint.at < HINT_GHOST_TTL_SEC) {
+      drawHintGhost(ctx, state.hint, lb, timeSec);
+    }
+
     // nova flashes
     for (const ev of state.events) {
-      if (ev.round !== state.round) continue;
-      const age = state.tick - ev.tick;
-      if (age < 0 || age > NOVA_FLASH_TICKS) continue;
-      const t = age / NOVA_FLASH_TICKS;
+      const age = state.time - ev.t;
+      if (age < 0 || age > NOVA_FLASH_SEC) continue;
+      const t = age / NOVA_FLASH_SEC;
       const sx = lb.x + ev.x * lb.scale;
       const sy = lb.y + ev.y * lb.scale;
       const r = (6 + t * 40) * lb.scale * 0.1 * (ev.mass / 10 + 1);

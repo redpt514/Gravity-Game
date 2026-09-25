@@ -1,5 +1,8 @@
-/** Pointer input: place tools, drag walls; tap a node to remove it, drag a node placed this round to move it. */
+/** Pointer input: place tools, drag walls; tap a node to remove it, drag a fresh node (within
+ * GRACE_SEC of placement) to move it. Also lets the player tap a hint's ghost placement (with
+ * that tool selected) to accept it directly, without going through the toast's button. */
 import type { Game, GameState, Node as SimNode, ToolId } from '../sim/types';
+import { GRACE_SEC } from '../sim/types';
 import { computeLetterboxIn, screenToWorld, worldToScreen, type Letterbox, type Rect } from '../render/layout';
 import type { Preview } from '../render/scene';
 import { TOOL_DEFS } from '../render/toolDefs';
@@ -12,25 +15,20 @@ export interface InputCallbacks {
   getSelectedTool(): ToolId | null;
   /** the current screen-space area (px) the board is letterboxed into (not covered by HUD) */
   getBoardRect(): Rect;
-  /** called after a placement attempt is sent to the sim (success or not) */
+  /** called after a placement/move/remove attempt is sent to the sim (success or not) */
   onPlaced(): void;
   onPreview(p: Preview): void;
   /** a tap on the empty board with no tool selected */
   onHint(msg: string): void;
-  /** a placement attempt was rejected by the sim (ActionResult.reason) */
+  /** a placement/move/remove attempt was rejected by the sim (ActionResult.reason) */
   onRejected(reason: string): void;
+  /** the player tapped/placed the active hint's ghost — clears it from the UI's perspective */
+  onHintConsumed(): void;
 }
 
 const TOUCH_RADIUS_PX = 24;
 
-function distToSegment(
-  px: number,
-  py: number,
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-): number {
+function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
   const dx = x2 - x1;
   const dy = y2 - y1;
   const lenSq = dx * dx + dy * dy;
@@ -41,12 +39,7 @@ function distToSegment(
   return Math.hypot(px - cx, py - cy);
 }
 
-function hitTestNode(
-  state: GameState,
-  lb: Letterbox,
-  sx: number,
-  sy: number,
-): SimNode | null {
+function hitTestNode(state: GameState, lb: Letterbox, sx: number, sy: number): SimNode | null {
   for (let i = state.nodes.length - 1; i >= 0; i--) {
     const n = state.nodes[i];
     if (n.tool === 'wall' && n.x2 != null && n.y2 != null) {
@@ -63,12 +56,21 @@ function hitTestNode(
   return null;
 }
 
-export function attachInput(
-  canvas: HTMLCanvasElement,
-  game: Game,
-  uiRoot: HTMLElement,
-  cb: InputCallbacks,
-): InputHandle {
+/** True if a tap at (sx,sy) lands on the currently active hint ghost's geometry. */
+function hitTestHint(state: GameState, lb: Letterbox, sx: number, sy: number): boolean {
+  const h = state.hint;
+  if (!h) return false;
+  if (h.x2 !== undefined && h.y2 !== undefined) {
+    const p1 = worldToScreen(h.x, h.y, lb);
+    const p2 = worldToScreen(h.x2, h.y2, lb);
+    return distToSegment(sx, sy, p1.x, p1.y, p2.x, p2.y) < TOUCH_RADIUS_PX;
+  }
+  const p = worldToScreen(h.x, h.y, lb);
+  const dx = sx - p.x, dy = sy - p.y;
+  return dx * dx + dy * dy < TOUCH_RADIUS_PX * TOUCH_RADIUS_PX;
+}
+
+export function attachInput(canvas: HTMLCanvasElement, game: Game, uiRoot: HTMLElement, cb: InputCallbacks): InputHandle {
   /** place: dragging out a new tool; node: pressed an existing node (tap = remove popover, drag = move) */
   type Gesture =
     | { kind: 'place'; start: { x: number; y: number } }
@@ -78,8 +80,9 @@ export function attachInput(
   let popoverEl: HTMLElement | null = null;
   const DRAG_THRESHOLD_PX = 8;
 
-  /** Nodes placed during the current planning phase have never been simulated: free to move, full refund. */
-  const isFresh = (node: SimNode, state: GameState) => node.placedRound === state.round;
+  /** Nodes within GRACE_SEC of placement are free to move/remove-for-refund; older ones can
+   * still be removed (no refund) but not moved. */
+  const isFresh = (node: SimNode, state: GameState) => state.time - node.placedAt <= GRACE_SEC;
 
   function removePopover() {
     if (popoverEl) {
@@ -94,7 +97,7 @@ export function attachInput(
     const def = TOOL_DEFS[node.tool];
     const fresh = isFresh(node, state);
     const refund = !fresh ? 'no refund' : node.free ? 'returns to inventory' : `+${def.cost} refund`;
-    const tip = fresh ? 'or drag it to move' : 'placed in an earlier round';
+    const tip = fresh ? 'or drag it to move' : 'grace period expired — placed earlier';
     const rect = canvas.getBoundingClientRect();
     const div = document.createElement('div');
     div.className = 'popover panel layer';
@@ -150,7 +153,16 @@ export function attachInput(
   function onPointerDown(e: PointerEvent) {
     removePopover();
     const { world, lb, state, sx, sy } = toWorld(e.clientX, e.clientY);
-    if (state.phase !== 'plan') return;
+    if (state.phase === 'intro') return;
+    // A tap on the active hint ghost, with that tool selected, places it directly.
+    if (state.hint && cb.getSelectedTool() === state.hint.tool && hitTestHint(state, lb, sx, sy)) {
+      const h = state.hint;
+      const r = game.apply({ type: 'place', tool: h.tool, x: h.x, y: h.y, x2: h.x2, y2: h.y2 });
+      if (!r.ok) cb.onRejected(r.reason ?? 'Cannot place there');
+      else cb.onHintConsumed();
+      cb.onPlaced();
+      return;
+    }
     // Existing nodes take priority over placing, so a node can always be removed or moved.
     const hit = hitTestNode(state, lb, sx, sy);
     if (hit) {
@@ -169,7 +181,7 @@ export function attachInput(
 
   function onPointerMove(e: PointerEvent) {
     const { world, state, sx, sy } = toWorld(e.clientX, e.clientY);
-    if (state.phase !== 'plan') {
+    if (state.phase === 'intro') {
       cb.onPreview(null);
       return;
     }
@@ -219,7 +231,7 @@ export function attachInput(
     gesture = null;
     cb.onPreview(null);
     const { world, state } = toWorld(e.clientX, e.clientY);
-    if (!commit || !g || state.phase !== 'plan') return;
+    if (!commit || !g || state.phase === 'intro') return;
 
     if (g.kind === 'node') {
       if (!g.moved) {
@@ -227,7 +239,7 @@ export function attachInput(
         return;
       }
       if (!isFresh(g.node, state)) {
-        cb.onRejected('Only nodes placed this round can be moved. Tap it to remove.');
+        cb.onRejected('Grace period expired — this node can no longer be moved. Tap it to remove.');
         return;
       }
       const t = movedTarget(g, world);

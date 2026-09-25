@@ -141,13 +141,11 @@ function placeholderLevel(n: number): LevelDef {
     seed: n,
     particleCount: 1800,
     initialMix: { H: 1 },
-    rounds: 3,
-    ticksPerRound: 600,
     startingEnergy: 80,
-    incomePerRound: 40,
+    incomePerSec: 4,
     ambientGravity: 0.3,
     tools: ['repulsor', 'wall'],
-    goals: [{ type: 'clouds', count: 1, byRound: 3, label: 'Form 1 particle cloud' }],
+    goals: [{ type: 'clouds', count: 1, deadlineSec: 60, points: 100, label: 'Form 1 particle cloud' }],
   };
 }
 
